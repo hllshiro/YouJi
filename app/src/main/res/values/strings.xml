@@ -1,0 +1,72 @@
+<resources>
+    <string name="app_name">游记</string>
+
+    <!-- 导航 -->
+    <string name="nav_home">首页</string>
+    <string name="nav_explore">发现</string>
+    <string name="nav_create">创建</string>
+    <string name="nav_settings">设置</string>
+
+    <!-- 首页 -->
+    <string name="home_title">我的游记</string>
+    <string name="home_empty">还没有游记，快去记录你的旅行吧！</string>
+    <string name="home_create_first">创建第一篇游记</string>
+
+    <!-- 创建游记 -->
+    <string name="create_title">创建游记</string>
+    <string name="create_select_photos">选择照片</string>
+    <string name="create_take_photo">拍照</string>
+    <string name="create_generate">生成游记</string>
+    <string name="create_edit">编辑游记</string>
+    <string name="create_title_hint">游记标题</string>
+    <string name="create_content_hint">记录此刻的心情...</string>
+    <string name="create_date_range">选择日期范围</string>
+    <string name="create_start_date">开始日期</string>
+    <string name="create_end_date">结束日期</string>
+    <string name="create_photos_count">已选 %1$d 张照片</string>
+    <string name="create_use_vlm">使用VLM大模型生成</string>
+
+    <!-- 游记详情 -->
+    <string name="detail_title">游记详情</string>
+    <string name="detail_edit">编辑</string>
+    <string name="detail_delete">删除</string>
+    <string name="detail_delete_confirm">确定要删除这篇游记吗？</string>
+    <string name="detail_confirm">确定</string>
+    <string name="detail_cancel">取消</string>
+    <string name="detail_share">分享</string>
+    <string name="detail_location">位置</string>
+    <string name="detail_time">时间</string>
+    <string name="detail_one_image">一图流</string>
+
+    <!-- 设置 -->
+    <string name="settings_title">设置</string>
+    <string name="settings_vlm">VLM大模型配置</string>
+    <string name="settings_vlm_enable">启用VLM大模型</string>
+    <string name="settings_vlm_api_url">API地址</string>
+    <string name="settings_vlm_api_key">API Key</string>
+    <string name="settings_vlm_model">模型名称</string>
+    <string name="settings_vlm_prompt">自定义提示词</string>
+    <string name="settings_vlm_prompt_hint">例如：请根据以下照片和位置信息，生成一段优美的游记文字...</string>
+    <string name="settings_save">保存配置</string>
+    <string name="settings_saved">配置已保存</string>
+    <string name="settings_about">关于</string>
+    <string name="settings_about_content">游记 v1.0\n记录每一次旅行的美好时光\n所有数据本地存储，守护您的隐私</string>
+    <string name="settings_clear_data">清除所有数据</string>
+    <string name="settings_clear_confirm">确定要清除所有数据吗？此操作不可恢复！</string>
+
+    <!-- 一图流 -->
+    <string name="one_image_title">游记一图流</string>
+    <string name="one_image_generate">生成一图流</string>
+    <string name="one_image_saving">保存中...</string>
+    <string name="one_image_saved">已保存到相册</string>
+
+    <!-- 通用 -->
+    <string name="common_loading">加载中...</string>
+    <string name="common_error">出错了</string>
+    <string name="common_retry">重试</string>
+    <string name="common_back">返回</string>
+    <string name="common_save">保存</string>
+    <string name="common_permission_denied">权限被拒绝</string>
+    <string name="common_camera_permission_needed">需要相机权限才能拍照</string>
+    <string name="common_gallery_permission_needed">需要存储权限才能选择照片</string>
+</resources>

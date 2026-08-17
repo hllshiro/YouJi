@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 照相机主体外框 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,38 L78,38 Q82,38 82,42 L82,70 Q82,78 74,78 L34,78 Q26,78 26,70 L26,42 Q26,38 30,38 Z"/>
+    <!-- 镜头外圈 (用path画圆: cx=54, cy=60, r=16) -->
+    <path
+        android:fillColor="#FFDBCB"
+        android:pathData="M54,44 C62.84,44 70,51.16 70,60 C70,68.84 62.84,76 54,76 C45.16,76 38,68.84 38,60 C38,51.16 45.16,44 54,44 Z"/>
+    <!-- 镜头内圈 (cx=54, cy=60, r=11) -->
+    <path
+        android:fillColor="#6750A4"
+        android:pathData="M54,49 C60.08,49 65,53.92 65,60 C65,66.08 60.08,71 54,71 C47.92,71 43,66.08 43,60 C43,53.92 47.92,49 54,49 Z"/>
+    <!-- 镜头反光 (cx=50, cy=56, r=4) -->
+    <path
+        android:fillColor="#E8DEF8"
+        android:pathData="M50,52 C52.21,52 54,53.79 54,56 C54,58.21 52.21,60 50,60 C47.79,60 46,58.21 46,56 C46,53.79 47.79,52 50,52 Z"/>
+    <!-- 顶部闪光灯 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,38 Q36,30 44,30 L46,30 Q48,30 48,32 L48,38 Z"/>
+    <!-- 地图标记 -->
+    <path
+        android:fillColor="#4A1400"
+        android:pathData="M76,34 C70.5,34 66,38.5 66,44 C66,51 76,62 76,62 C76,62 86,51 86,44 C86,38.5 81.5,34 76,34 Z M76,49 C73.2,49 71,46.8 71,44 C71,41.2 73.2,39 76,39 C78.8,39 81,41.2 81,44 C81,46.8 78.8,49 76,49 Z"/>
+</vector>

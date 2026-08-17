@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 主色调 -->
+    <color name="primary">#FF6B35</color>
+    <color name="onPrimary">#FFFFFF</color>
+    <color name="primary_container">#FFDBCB</color>
+    <color name="onPrimary_container">#4A1400</color>
+
+    <!-- 次要色 -->
+    <color name="secondary">#6750A4</color>
+    <color name="onSecondary">#FFFFFF</color>
+    <color name="secondary_container">#E8DEF8</color>
+    <color name="onSecondary_container">#1F0041</color>
+
+    <!-- 背景 -->
+    <color name="background">#FFFBFF</color>
+    <color name="onBackground">#201A18</color>
+
+    <!-- 表面 -->
+    <color name="surface">#FFFBFF</color>
+    <color name="onSurface">#201A18</color>
+    <color name="surfaceVariant">#F4DED6</color>
+    <color name="onSurfaceVariant">#53433F</color>
+
+    <!-- 其他 -->
+    <color name="outline">#85736E</color>
+    <color name="error">#BA1A1A</color>
+    <color name="onError">#FFFFFF</color>
+</resources>
