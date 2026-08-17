@@ -46,12 +46,43 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-34
-            build-tools;34.0.0
+      - name: Verify / install Android SDK components
+        run: |
+          # ubuntu-latest 已预装 Android SDK 到 /usr/local/lib/android/sdk
+          # 先确认 platform-34 与 build-tools 34 存在；若缺失再通过 sdkmanager 补齐（非强制）
+          SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          echo "SDK_ROOT=${SDK_ROOT}"
+          echo "--- Pre-installed platforms ---"
+          ls -1 "${SDK_ROOT}/platforms" 2>/dev/null || echo "(none)"
+          echo "--- Pre-installed build-tools ---"
+          ls -1 "${SDK_ROOT}/build-tools" 2>/dev/null || echo "(none)"
+
+          if [ -d "${SDK_ROOT}/platforms/android-34" ] && \
+             ls -d "${SDK_ROOT}/build-tools/34."* 1>/dev/null 2>&1; then
+            echo "✅ platforms;android-34 与 build-tools 34.x 已存在，跳过安装"
+            exit 0
+          fi
+
+          echo "⚠️  SDK 组件缺失，尝试使用 sdkmanager 补齐"
+          SDKMANAGER=$(find "${SDK_ROOT}" -name sdkmanager -type f 2>/dev/null | head -1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: 未找到 sdkmanager"
+            exit 1
+          fi
+          echo "Using sdkmanager at: ${SDKMANAGER}"
+          yes 2>/dev/null | "$SDKMANAGER" --sdk_root="${SDK_ROOT}" --licenses || true
+          "$SDKMANAGER" --sdk_root="${SDK_ROOT}" --install \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            --verbose || true
+
+          # 二次确认
+          if [ -d "${SDK_ROOT}/platforms/android-34" ] && \
+             ls -d "${SDK_ROOT}/build-tools/34."* 1>/dev/null 2>&1; then
+            echo "✅ SDK 组件安装完成"
+          else
+            echo "::warning::部分SDK组件仍缺失，后续 Gradle 会再尝试自动下载"
+          fi
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
