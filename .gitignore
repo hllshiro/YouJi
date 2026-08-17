@@ -22,3 +22,13 @@ local.properties
 
 # Logs
 *.log
+
+# ====== 签名/安全 ======
+# Keystore 及密码绝对不进 Git（CI 通过 GitHub Secrets 注入）
+app/keystore/
+*.jks
+*.keystore
+*.p12
+*.pfx
+signing.properties
+keystore.properties

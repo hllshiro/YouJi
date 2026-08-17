@@ -4,6 +4,25 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+import java.io.FileInputStream
+import java.util.Properties
+
+// 从 Gradle properties 读取签名配置（来源优先级：
+//   1. CI workflow 通过 -Pyouji.storeFile=... 等参数显式传入
+//   2. $GRADLE_USER_HOME/gradle.properties 或项目根 gradle.properties
+//   3. local.properties（仅本地开发，已被 gitignore）
+// 密码绝不写死在仓库代码里。
+fun signingProp(name: String): String? {
+    val fromGradle = providers.gradleProperty(name).orNull
+    if (!fromGradle.isNullOrBlank()) return fromGradle
+    val local = rootProject.file("local.properties")
+    if (!local.exists()) return null
+    val props = Properties()
+    FileInputStream(local).use { props.load(it) }
+    val v = props.getProperty(name)
+    return if (v.isNullOrBlank()) null else v
+}
+
 android {
     namespace = "com.youji.app"
     compileSdk = 34
@@ -12,8 +31,8 @@ android {
         applicationId = "com.youji.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -21,9 +40,41 @@ android {
         }
     }
 
+    signingConfigs {
+        // 有签名参数时用统一签名，没有则回退到 Android 默认 debug.keystore（仅 debug 可跑通，
+        // release 必须显式提供签名否则报错）。这样本地开发和 CI 各得其所。
+        val youjiStoreFile = signingProp("youji.storeFile")
+        val youjiStorePassword = signingProp("youji.storePassword")
+        val youjiKeyAlias = signingProp("youji.keyAlias")
+        val youjiKeyPassword = signingProp("youji.keyPassword")
+
+        val hasYoujiSigning =
+            !youjiStoreFile.isNullOrBlank() &&
+            !youjiStorePassword.isNullOrBlank() &&
+            !youjiKeyAlias.isNullOrBlank() &&
+            !youjiKeyPassword.isNullOrBlank()
+
+        if (hasYoujiSigning) {
+            create("youji") {
+                storeFile = file(youjiStoreFile!!)
+                storePassword = youjiStorePassword!!
+                keyAlias = youjiKeyAlias!!
+                keyPassword = youjiKeyPassword!!
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig =
+                signingConfigs.findByName("youji")
+                ?: signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig =
+                signingConfigs.findByName("youji")
+                ?: error("Release build requires youji.* signing properties (storeFile/storePassword/keyAlias/keyPassword)")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

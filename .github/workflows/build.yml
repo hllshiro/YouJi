@@ -46,6 +46,37 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Restore signing keystore from GitHub Secrets
+        env:
+          YJ_KEYSTORE_BASE64: ${{ secrets.YJ_KEYSTORE_BASE64 }}
+        run: |
+          # Release 构建要求必须配置签名；Debug 允许缺失（会回退到默认 debug.keystore）
+          mkdir -p app/keystore
+          KEYSTORE_PATH="$GITHUB_WORKSPACE/app/keystore/youji.jks"
+          echo "keystore_path=${KEYSTORE_PATH}" >> "$GITHUB_ENV"
+
+          if [ -z "${YJ_KEYSTORE_BASE64}" ]; then
+            if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+              echo "::error::Release build requires secret YJ_KEYSTORE_BASE64, but it is empty. Configure it under repo Settings → Secrets and variables → Actions."
+              exit 1
+            fi
+            echo "::warning::Secret YJ_KEYSTORE_BASE64 not set. Debug build will fall back to default debug.keystore (APK signature inconsistent across runs)."
+            exit 0
+          fi
+
+          # 安全还原：内容直接 base64 解码到文件，不经过 stdout
+          printf '%s' "${YJ_KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
+
+          # 基础校验：文件存在且为非空
+          if [ ! -s "${KEYSTORE_PATH}" ]; then
+            echo "::error::Keystore restored but empty or invalid base64."
+            exit 1
+          fi
+
+          chmod 600 "${KEYSTORE_PATH}"
+          # 只打印大小，不打印可能泄露的任何字节
+          echo "✅ Keystore restored, size=$(stat -c%s "${KEYSTORE_PATH}") bytes"
+
       - name: Verify / install Android SDK components
         run: |
           # ubuntu-latest 已预装 Android SDK 到 /usr/local/lib/android/sdk
@@ -104,11 +135,48 @@ jobs:
 
       - name: Build debug APK
         if: github.event.inputs.build_type != 'release'
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        env:
+          YJ_STORE_PASSWORD: ${{ secrets.YJ_STORE_PASSWORD }}
+          YJ_KEY_ALIAS:      ${{ secrets.YJ_KEY_ALIAS }}
+          YJ_KEY_PASSWORD:   ${{ secrets.YJ_KEY_PASSWORD }}
+        run: |
+          # 仅当 secret 齐全才注入统一签名；否则回退到默认 debug keystore（CI友好）
+          SIGN_ARGS=()
+          if [ -n "${keystore_path:-}" ] && \
+             [ -n "${YJ_STORE_PASSWORD}" ] && \
+             [ -n "${YJ_KEY_ALIAS}" ] && \
+             [ -n "${YJ_KEY_PASSWORD}" ]; then
+            SIGN_ARGS+=(
+              -Pyouji.storeFile="${keystore_path}"
+              -Pyouji.storePassword="${YJ_STORE_PASSWORD}"
+              -Pyouji.keyAlias="${YJ_KEY_ALIAS}"
+              -Pyouji.keyPassword="${YJ_KEY_PASSWORD}"
+            )
+          else
+            echo "::warning::Signing secrets incomplete; debug build will use default android debug keystore."
+          fi
+          ./gradlew assembleDebug --no-daemon --stacktrace "${SIGN_ARGS[@]}"
 
       - name: Build release APK
         if: github.event.inputs.build_type == 'release'
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
+        env:
+          YJ_STORE_PASSWORD: ${{ secrets.YJ_STORE_PASSWORD }}
+          YJ_KEY_ALIAS:      ${{ secrets.YJ_KEY_ALIAS }}
+          YJ_KEY_PASSWORD:   ${{ secrets.YJ_KEY_PASSWORD }}
+        run: |
+          if [ -z "${keystore_path:-}" ] || [ ! -f "${keystore_path}" ]; then
+            echo "::error::Release build requires YJ_KEYSTORE_BASE64 secret (keystore missing)."
+            exit 1
+          fi
+          if [ -z "${YJ_STORE_PASSWORD}" ] || [ -z "${YJ_KEY_ALIAS}" ] || [ -z "${YJ_KEY_PASSWORD}" ]; then
+            echo "::error::Release build requires YJ_STORE_PASSWORD / YJ_KEY_ALIAS / YJ_KEY_PASSWORD secrets."
+            exit 1
+          fi
+          ./gradlew assembleRelease --no-daemon --stacktrace \
+            -Pyouji.storeFile="${keystore_path}" \
+            -Pyouji.storePassword="${YJ_STORE_PASSWORD}" \
+            -Pyouji.keyAlias="${YJ_KEY_ALIAS}" \
+            -Pyouji.keyPassword="${YJ_KEY_PASSWORD}"
 
       - name: Locate built APK
         id: apk
