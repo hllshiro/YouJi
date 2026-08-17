@@ -93,7 +93,8 @@ class SettingsViewModel(
     }
 
     /**
-     * 拉取可用模型列表。成功后自动切换为下拉模式（除非用户已主动选择自定义输入）。
+     * 拉取可用模型列表。成功后只更新 modelsState，不自动保存到 repository。
+     * 自动选中第一个模型的逻辑由 UI 层通过 onModelChange 处理（仅更新 localSettings）。
      */
     fun fetchModels(settings: VlmSettings) {
         if (settings.apiUrl.isBlank() || settings.apiKey.isBlank()) {
@@ -107,13 +108,6 @@ class SettingsViewModel(
             }
             _modelsState.value = result.fold(
                 onSuccess = { models ->
-                    if (!_useCustomModelInput.value) {
-                        // 如果当前选中的模型不在列表中，且列表非空，则自动选中第一个
-                        val current = vlmSettings.value.modelName
-                        if (current.isBlank() || !models.contains(current)) {
-                            updateModelName(models.first())
-                        }
-                    }
                     ModelsState.Success(models)
                 },
                 onFailure = { ModelsState.Error(it.message ?: it.javaClass.simpleName) }
@@ -150,14 +144,14 @@ class SettingsViewModel(
                 vlmClient.testVisionCapability(settings)
             }
             _testState.value = when {
-                !result.success && result.message.contains("不支持图像") -> {
+                result.success && result.supportsVision -> {
+                    VlmTestState.Success(result.message, result.latencyMs)
+                }
+                result.success && !result.supportsVision -> {
                     VlmTestState.NoVision(result.message)
                 }
-                !result.success -> {
-                    VlmTestState.Error(result.message)
-                }
                 else -> {
-                    VlmTestState.Success(result.message, result.latencyMs)
+                    VlmTestState.Error(result.message)
                 }
             }
         }

@@ -1,10 +1,14 @@
 package cn.hllcloud.youji.util
 
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.util.Base64
 import cn.hllcloud.youji.data.VlmSettings
 import cn.hllcloud.youji.data.entity.PhotoEntity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -41,20 +45,19 @@ class VlmClient {
      * 实现策略（两阶段，确保结果可靠）：
      *
      * 阶段1 - 连通性测试：
-     *   根据用户配置的 apiUrl 自动推断 base URL（去掉 /v1/chat/completions、
-     *   /chat/completions 等路径后缀），向 GET {base}/v1/models 或 {base}/models
-     *   发请求，验证 API 地址可达且鉴权通过。
+     *   通过 resolveUrls 推断 baseUrl，向 GET {base}/models 发请求，
+     *   验证 API 地址可达且鉴权通过。
      *   - 404 表示 baseUrl 不对（用户填错路径或缺少/多了 v1）
      *   - 401/403 表示 apiKey 无效
      *   - 200 表示连通正常
      *
      * 阶段2 - Vision 探测：
-     *   向用户配置的 apiUrl 发送一个最小 Vision 请求（1x1 PNG + 文字提示）。
+     *   通过 resolveUrls 推断 chat 端点（自动补全 /chat/completions），
+     *   发送一个最小 Vision 请求（32x32 JPEG + detail:"low" + 文字提示）。
      *   - 200 且响应包含 choices[].message.content 视为支持 Vision
      *   - 4xx 且错误信息含 image/vision/unsupported 等关键词视为不支持 Vision
-     *   - 其他 4xx 视为请求格式或参数错误（不一定是 Vision 问题）
-     *
-     * 这样可以避免 404 被误判为"测试通过"。
+     *   - 404 视为 chat 端点路径错误（success=false）
+     *   - 其他 4xx 视为请求格式或参数错误（success=false，不误判为"通过"）
      */
     suspend fun testVisionCapability(settings: VlmSettings): VisionTestResult {
         if (settings.apiUrl.isBlank()) {
@@ -80,9 +83,17 @@ class VlmClient {
 
         // ===== 阶段2：Vision 探测 =====
         return try {
-            val tinyPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+            // 生成 32x32 纯色 JPEG 作为测试图片（比 1x1 PNG 更符合规范）
+            val testBitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+            testBitmap.eraseColor(Color.rgb(100, 150, 200))
+            val testBaos = ByteArrayOutputStream()
+            testBitmap.compress(Bitmap.CompressFormat.JPEG, 80, testBaos)
+            testBitmap.recycle()
+            val testImageBase64 = Base64.encodeToString(testBaos.toByteArray(), Base64.NO_WRAP)
 
-            val url = URL(settings.apiUrl)
+            // 使用解析后的 chat 端点（自动补全 /chat/completions）
+            val (_, chatUrl) = resolveUrls(settings.apiUrl)
+            val url = URL(chatUrl)
             val connection = url.openConnection() as HttpURLConnection
             try {
                 connection.requestMethod = "POST"
@@ -103,7 +114,8 @@ class VlmClient {
                     put(JSONObject().apply {
                         put("type", "image_url")
                         put("image_url", JSONObject().apply {
-                            put("url", "data:image/png;base64,$tinyPngBase64")
+                            put("url", "data:image/jpeg;base64,$testImageBase64")
+                            put("detail", "low")
                         })
                     })
                 }
@@ -150,16 +162,30 @@ class VlmClient {
                         (lowerResp.contains("not support") || lowerResp.contains("unsupported") ||
                             lowerResp.contains("does not support")) ||
                         (lowerResp.contains("image") && lowerResp.contains("not support"))
-                    return VisionTestResult(
-                        success = true,  // API本身可达且鉴权通过（连通性已验证）
-                        supportsVision = false,
-                        message = if (notSupportVision) {
-                            "API连通正常，但该模型不支持图像理解 (HTTP $responseCode)"
-                        } else {
-                            "API连通正常，但Vision请求失败 (HTTP $responseCode): ${response.take(200)}"
-                        },
-                        latencyMs = latency
-                    )
+
+                    return when {
+                        // 404: chat 端点不存在，说明 apiUrl 路径不对
+                        responseCode == 404 -> VisionTestResult(
+                            success = false,
+                            supportsVision = false,
+                            message = "Chat端点不存在 (HTTP 404)：$chatUrl。请检查 apiUrl 路径是否正确（通常填 baseUrl 即可，如 https://api.openai.com/v1，系统会自动补全 /chat/completions）",
+                            latencyMs = latency
+                        )
+                        // 明确不支持 Vision：API 可达，仅模型不支持图像
+                        notSupportVision -> VisionTestResult(
+                            success = true,
+                            supportsVision = false,
+                            message = "API连通正常，但该模型不支持图像理解 (HTTP $responseCode)",
+                            latencyMs = latency
+                        )
+                        // 其他错误：视为测试失败，不猜测为"通过"
+                        else -> VisionTestResult(
+                            success = false,
+                            supportsVision = false,
+                            message = "Vision请求失败 (HTTP $responseCode): ${response.take(200)}",
+                            latencyMs = latency
+                        )
+                    }
                 }
 
                 // 解析OpenAI兼容响应
@@ -194,6 +220,23 @@ class VlmClient {
     }
 
     /**
+     * 从用户输入的 apiUrl 推断 baseUrl 和 chat/completions 端点。
+     *
+     * v1 路径段由用户自行决定，本方法不猜测。
+     * - https://api.openai.com/v1/chat/completions → baseUrl=https://api.openai.com/v1, chatUrl=原样
+     * - https://api.openai.com/v1 → baseUrl=原样, chatUrl=原样/chat/completions
+     * - https://api.deepseek.com → baseUrl=原样, chatUrl=原样/chat/completions
+     *
+     * @return Pair(baseUrl, chatUrl)
+     */
+    private fun resolveUrls(apiUrl: String): Pair<String, String> {
+        val url = apiUrl.trim().trimEnd('/')
+        val baseUrl = url.removeSuffix("/chat/completions")
+        val chatUrl = if (url.endsWith("/chat/completions")) url else "$baseUrl/chat/completions"
+        return Pair(baseUrl, chatUrl)
+    }
+
+    /**
      * 连通性测试：根据 apiUrl 推断 base URL，调用 GET /models
      *
      * v1 路径段由用户在 apiUrl 中自行包含或省略，本方法不做猜测。
@@ -204,9 +247,7 @@ class VlmClient {
      * @return Pair<Boolean, String> first=true 表示连通正常
      */
     private fun testConnectivity(settings: VlmSettings): Pair<Boolean, String> {
-        val apiUrl = settings.apiUrl.trim().trimEnd('/')
-        // 仅去掉 /chat/completions 后缀，保留用户原本的 v1 设置
-        val baseUrl = apiUrl.removeSuffix("/chat/completions")
+        val (baseUrl, _) = resolveUrls(settings.apiUrl)
         val modelsUrl = "$baseUrl/models"
 
         return try {
@@ -249,8 +290,7 @@ class VlmClient {
             return Result.failure(IllegalStateException("API地址未配置"))
         }
 
-        val apiUrl = settings.apiUrl.trim().trimEnd('/')
-        val baseUrl = apiUrl.removeSuffix("/chat/completions")
+        val (baseUrl, _) = resolveUrls(settings.apiUrl)
         val modelsUrl = "$baseUrl/models"
 
         return try {
@@ -316,8 +356,15 @@ class VlmClient {
     }
 
     /**
-     * 调用VLM生成游记内容
-     * 注意：实际部署时需要在后台线程调用
+     * 调用VLM生成游记内容（支持Vision图像理解）
+     *
+     * 处理流程：
+     * 1. 构建文本提示词和位置信息
+     * 2. 读取照片文件，压缩为 JPEG 并 base64 编码
+     * 3. 构建 OpenAI 兼容的 Vision 请求（content 为数组，包含 text 和 image_url）
+     * 4. 如果没有图片，退化为纯文本请求
+     *
+     * 注意：应在 IO 线程调用（涉及文件读取和网络请求）
      */
     suspend fun generateTravelContent(
         settings: VlmSettings,
@@ -335,8 +382,15 @@ class VlmClient {
             // 构建图片位置信息
             val locationInfo = buildLocationInfo(photos)
 
-            // 发送请求（这里是标准实现，实际接入时根据API文档调整）
-            val response = sendHttpRequest(settings, prompt, locationInfo)
+            // 读取并压缩图片为 base64 data URL（长边 1024px，JPEG 80%）
+            val imageDataUrls = photos.mapNotNull { photo ->
+                ImageUtil.compressAndBase64Encode(photo.filePath)?.let { base64 ->
+                    ImageUtil.buildDataUrl(base64)
+                }
+            }
+
+            // 发送请求
+            val response = sendHttpRequest(settings, prompt, locationInfo, imageDataUrls)
             Result.success(response)
         } catch (e: Exception) {
             Result.failure(e)
@@ -406,14 +460,21 @@ $photoDetails
 
     /**
      * 发送HTTP请求到VLM API
-     * 这是一个通用的OpenAI兼容格式实现，用户可以根据自己的API文档修改
+     *
+     * OpenAI 兼容格式实现：
+     * - 有图片时：content 为数组，包含 text + image_url（Vision 模式）
+     * - 无图片时：content 为字符串（纯文本模式）
+     *
+     * 图片使用 detail:"low" 以降低 token 消耗（固定 85 tokens/图）。
      */
     private fun sendHttpRequest(
         settings: VlmSettings,
         prompt: String,
-        locationInfo: String
+        locationInfo: String,
+        imageDataUrls: List<String> = emptyList()
     ): String {
-        val url = URL(settings.apiUrl)
+        val (_, chatUrl) = resolveUrls(settings.apiUrl)
+        val url = URL(chatUrl)
         val connection = url.openConnection() as HttpURLConnection
 
         return try {
@@ -426,15 +487,36 @@ $photoDetails
             }
             connection.doOutput = true
 
-            // 构建请求体 (OpenAI兼容格式)
+            val fullPrompt = "$prompt\n\n附加信息:\n$locationInfo"
+
             val requestBody = JSONObject().apply {
                 put("model", settings.modelName.ifBlank { "default" })
-                put("messages", listOf(
-                    JSONObject().apply {
+                put("messages", JSONArray().apply {
+                    put(JSONObject().apply {
                         put("role", "user")
-                        put("content", "$prompt\n\n附加信息:\n$locationInfo")
-                    }
-                ))
+                        if (imageDataUrls.isEmpty()) {
+                            // 无图片：纯文本格式
+                            put("content", fullPrompt)
+                        } else {
+                            // 有图片：OpenAI Vision 格式（content 为数组）
+                            val contentArray = JSONArray()
+                            contentArray.put(JSONObject().apply {
+                                put("type", "text")
+                                put("text", fullPrompt)
+                            })
+                            imageDataUrls.forEach { dataUrl ->
+                                contentArray.put(JSONObject().apply {
+                                    put("type", "image_url")
+                                    put("image_url", JSONObject().apply {
+                                        put("url", dataUrl)
+                                        put("detail", "low")
+                                    })
+                                })
+                            }
+                            put("content", contentArray)
+                        }
+                    })
+                })
                 put("temperature", 0.7)
                 put("max_tokens", 2000)
             }

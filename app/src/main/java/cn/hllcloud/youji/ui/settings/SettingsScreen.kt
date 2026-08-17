@@ -639,6 +639,18 @@ private fun ModelSelectorField(
         }
     }
 
+    // models 拉取成功后，如果当前 modelName 为空或不在列表中，自动选中第一个
+    // 仅更新 localSettings，不保存到 repository，避免覆盖用户未保存的 apiUrl/apiKey
+    LaunchedEffect(modelsState) {
+        if (modelsState is SettingsViewModel.ModelsState.Success && !useCustomInput) {
+            val models = (modelsState as SettingsViewModel.ModelsState.Success).models
+            val current = localSettings.modelName
+            if (models.isNotEmpty() && (current.isBlank() || !models.contains(current))) {
+                onModelChange(models.first())
+            }
+        }
+    }
+
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
