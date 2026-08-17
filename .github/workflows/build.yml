@@ -1,0 +1,140 @@
+name: Build App
+
+on:
+  # 允许在 GitHub Actions 页面手动触发
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 构建类型
+        required: true
+        type: choice
+        default: debug
+        options:
+          - debug
+          - release
+      upload_apk:
+        description: 上传 APK 作为产物
+        required: false
+        type: boolean
+        default: true
+
+# 同一分支+构建类型的新运行会取消正在进行的旧运行
+concurrency:
+  group: build-${{ github.ref }}-${{ github.event.inputs.build_type || 'debug' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # Gradle 配置：禁用 daemon（CI 环境每次都是新进程）
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true -Dorg.gradle.jvmargs=-Xmx2048m"
+      # Android SDK 路径（ubuntu-latest 预装位置）
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_HOME: /usr/local/lib/android/sdk
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-34
+            build-tools;34.0.0
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # 使用项目自带的 gradlew 包装器（gradle-wrapper.properties 锁定 Gradle 8.9）
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Generate local.properties
+        run: |
+          echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
+          cat local.properties
+
+      - name: Print environment
+        run: |
+          echo "=== Java ==="
+          java -version
+          echo "=== Gradle wrapper ==="
+          ./gradlew --version
+
+      - name: Build debug APK
+        if: github.event.inputs.build_type != 'release'
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Build release APK
+        if: github.event.inputs.build_type == 'release'
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Locate built APK
+        id: apk
+        run: |
+          if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+            APK_DIR="app/build/outputs/apk/release"
+            APK_NAME="app-release.apk"
+          else
+            APK_DIR="app/build/outputs/apk/debug"
+            APK_NAME="app-debug.apk"
+          fi
+          APK_PATH="${APK_DIR}/${APK_NAME}"
+          if [ ! -f "${APK_PATH}" ]; then
+            echo "ERROR: APK not found at ${APK_PATH}"
+            ls -la "${APK_DIR}" || true
+            exit 1
+          fi
+          echo "path=${APK_PATH}" >> "$GITHUB_OUTPUT"
+          echo "name=${APK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Found APK: ${APK_PATH}"
+          ls -lh "${APK_PATH}"
+
+      - name: Compute checksum
+        run: |
+          cd "$(dirname "${{ steps.apk.outputs.path }}")"
+          FILE="$(basename "${{ steps.apk.outputs.path }}")"
+          md5sum  "${FILE}" > "${FILE}.md5"
+          sha256sum "${FILE}" > "${FILE}.sha256"
+          echo "=== Checksums ==="
+          cat "${FILE}.md5" "${FILE}.sha256"
+
+      - name: Upload APK artifact
+        if: github.event.inputs.upload_apk != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: youji-${{ github.event.inputs.build_type || 'debug' }}-${{ github.sha }}
+          path: |
+            ${{ steps.apk.outputs.path }}
+            ${{ steps.apk.outputs.path }}.md5
+            ${{ steps.apk.outputs.path }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0  # APK 已是压缩格式，不再二次压缩
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Build Summary"
+            echo ""
+            echo "- **Status**: ${{ job.status }}"
+            echo "- **Build type**: ${{ github.event.inputs.build_type || 'debug' }}"
+            echo "- **Commit**: ${{ github.sha }}"
+            echo "- **Branch**: ${{ github.ref_name }}"
+            if [ -f "${{ steps.apk.outputs.path }}" ]; then
+              SIZE=$(du -h "${{ steps.apk.outputs.path }}" | cut -f1)
+              echo "- **APK size**: \`${SIZE}\`"
+              echo "- **APK path**: \`${{ steps.apk.outputs.path }}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
