@@ -64,18 +64,20 @@ jobs:
             exit 0
           fi
 
-          # 安全还原：内容直接 base64 解码到文件，不经过 stdout
-          printf '%s' "${YJ_KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
+          # 安全还原：先去除所有空白字符（换行/空格/制表符），再 base64 解码到文件
+          # 这样即使粘贴 secret 时被编辑器自动折行也能正常工作
+          CLEAN_B64=$(printf '%s' "${YJ_KEYSTORE_BASE64}" | tr -d '[:space:]')
+          printf '%s' "${CLEAN_B64}" | base64 -d > "${KEYSTORE_PATH}"
 
           # 基础校验：文件存在且为非空
           if [ ! -s "${KEYSTORE_PATH}" ]; then
-            echo "::error::Keystore restored but empty or invalid base64."
+            echo "::error::Keystore restored but empty or invalid base64. Length of cleaned input: ${#CLEAN_B64}"
             exit 1
           fi
 
           chmod 600 "${KEYSTORE_PATH}"
-          # 只打印大小，不打印可能泄露的任何字节
-          echo "✅ Keystore restored, size=$(stat -c%s "${KEYSTORE_PATH}") bytes"
+          # 只打印大小和清理后的字符数，不打印可能泄露的任何字节
+          echo "✅ Keystore restored, size=$(stat -c%s "${KEYSTORE_PATH}") bytes, base64 length=${#CLEAN_B64}"
 
       - name: Verify / install Android SDK components
         run: |
