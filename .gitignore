@@ -32,3 +32,8 @@ app/keystore/
 *.pfx
 signing.properties
 keystore.properties
+
+# 临时密钥/凭证配置清单（仅供本地参考，绝不入库）
+SECRETS_CONFIG.txt
+secrets*.txt
+*secret*.txt
