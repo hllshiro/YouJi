@@ -22,15 +22,22 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -45,6 +52,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,6 +87,7 @@ fun SettingsScreen(
     )
 ) {
     val currentSettings by viewModel.vlmSettings.collectAsStateWithLifecycle()
+    val testState by viewModel.testState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showClearDataConfirm by remember { mutableStateOf(false) }
@@ -86,6 +95,11 @@ fun SettingsScreen(
     // 临时编辑状态
     var localSettings by remember(currentSettings) { mutableStateOf(currentSettings) }
     var hasChanges by remember { mutableStateOf(false) }
+
+    // 测试状态自动重置：每次修改配置后清空旧的测试结果
+    LaunchedEffect(localSettings.apiUrl, localSettings.apiKey, localSettings.modelName) {
+        viewModel.clearTestState()
+    }
 
     Scaffold(
         topBar = {
@@ -268,6 +282,81 @@ fun SettingsScreen(
                                     focusedBorderColor = MaterialTheme.colorScheme.primary
                                 )
                             )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // 测试API连通性 & Vision能力
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            // 测试按钮：使用当前未保存的配置进行测试
+                            Button(
+                                onClick = { viewModel.testVlmConnection(localSettings) },
+                                enabled = testState !is SettingsViewModel.VlmTestState.Testing,
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(vertical = 12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+                                )
+                            ) {
+                                if (testState is SettingsViewModel.VlmTestState.Testing) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("测试中...", style = MaterialTheme.typography.labelLarge)
+                                } else {
+                                    Icon(imageVector = Icons.Default.NetworkCheck, contentDescription = null,
+                                        modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("测试API（Vision）", style = MaterialTheme.typography.labelLarge)
+                                }
+                            }
+                        }
+
+                        // 测试结果展示
+                        when (val state = testState) {
+                            is SettingsViewModel.VlmTestState.Success -> {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                TestResultCard(
+                                    icon = Icons.Default.CheckCircle,
+                                    iconTint = Color(0xFF2E7D32),
+                                    containerColor = Color(0xFF2E7D32).copy(alpha = 0.12f),
+                                    title = "测试通过 · 支持Vision",
+                                    message = state.message,
+                                    extra = "耗时 ${state.latencyMs}ms"
+                                )
+                            }
+                            is SettingsViewModel.VlmTestState.NoVision -> {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                TestResultCard(
+                                    icon = Icons.Default.VisibilityOff,
+                                    iconTint = Color(0xFFEF6C00),
+                                    containerColor = Color(0xFFEF6C00).copy(alpha = 0.12f),
+                                    title = "API可达，但不支持Vision",
+                                    message = state.message,
+                                    extra = "请更换支持视觉的模型，如 gpt-4o / qwen-vl-max"
+                                )
+                            }
+                            is SettingsViewModel.VlmTestState.Error -> {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                TestResultCard(
+                                    icon = Icons.Default.Error,
+                                    iconTint = Color(0xFFBA1A1A),
+                                    containerColor = Color(0xFFBA1A1A).copy(alpha = 0.12f),
+                                    title = "测试失败",
+                                    message = state.message,
+                                    extra = null
+                                )
+                            }
+                            else -> { /* Idle / Testing: 不显示结果卡片 */ }
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))
@@ -457,5 +546,58 @@ private fun SettingsInputField(
                 focusedBorderColor = MaterialTheme.colorScheme.primary
             )
         )
+    }
+}
+
+/**
+ * VLM API测试结果展示卡片
+ */
+@Composable
+private fun TestResultCard(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    iconTint: Color,
+    containerColor: Color,
+    title: String,
+    message: String,
+    extra: String?
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(containerColor)
+            .padding(12.dp)
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = iconTint
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = iconTint,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            if (!extra.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = extra,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }

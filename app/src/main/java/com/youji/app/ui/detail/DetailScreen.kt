@@ -342,7 +342,13 @@ fun DetailScreen(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PhotoCarousel(photos: List<PhotoEntity>) {
-    val pagerState = rememberPagerState(pageCount = { photos.size })
+    // 国产ROM/Compose兼容：照片列表变化时重建pagerState，避免索引越界崩溃
+    val safePhotos = remember(photos) { photos.toList() }
+    val photosCount = safePhotos.size
+    val pagerState = rememberPagerState(
+        initialPage = 0,
+        pageCount = { photosCount.coerceAtLeast(1) }
+    )
 
     Box(
         modifier = Modifier
@@ -353,32 +359,81 @@ private fun PhotoCarousel(photos: List<PhotoEntity>) {
             state = pagerState,
             modifier = Modifier.fillMaxSize()
         ) { page ->
-            val photo = photos[page]
-            val painter = rememberAsyncImagePainter(model = File(photo.filePath))
+            // 越界保护：极端情况下pagerState.currentPage可能短暂超出列表大小
+            if (page >= safePhotos.size) {
+                // 占位
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                )
+                return@HorizontalPager
+            }
+            val photo = safePhotos[page]
+            val file = remember(photo.filePath) { File(photo.filePath) }
+            // 文件不存在占位
+            if (!file.exists()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Image,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(40.dp)
+                    )
+                }
+                return@HorizontalPager
+            }
+            val painter = rememberAsyncImagePainter(
+                model = file,
+                // 失败时不会抛异常，避免滑动到坏图崩溃
+            )
             Image(
                 painter = painter,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
             )
-            if (painter.state is AsyncImagePainter.State.Loading) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                )
+            when (painter.state) {
+                is AsyncImagePainter.State.Loading -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                    )
+                }
+                is AsyncImagePainter.State.Error -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Image,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(40.dp)
+                        )
+                    }
+                }
+                else -> {}
             }
         }
 
         // 轮播指示器
-        if (photos.size > 1) {
+        if (photosCount > 1) {
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                repeat(photos.size) { index ->
+                repeat(photosCount) { index ->
                     val isSelected = pagerState.currentPage == index
                     Box(
                         modifier = Modifier

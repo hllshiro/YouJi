@@ -1,7 +1,9 @@
 package com.youji.app.ui.create
 
 import android.app.DatePickerDialog
+import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -38,6 +40,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -86,6 +89,7 @@ import com.youji.app.YouJiApplication
 import com.youji.app.data.entity.PhotoEntity
 import com.youji.app.util.DateFormatUtil
 import com.youji.app.util.FileUtil
+import com.youji.app.util.PermissionUtil
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Calendar
@@ -112,6 +116,12 @@ fun CreateTravelScreen(
     val scope = rememberCoroutineScope()
     var cameraPhotoFile by remember { mutableStateOf<File?>(null) }
     var showGenerateOptions by remember { mutableStateOf(false) }
+    // 标记是否已经请求过权限，用于区分"首次未请求"和"被永久拒绝"
+    var hasRequestedCameraPermission by remember { mutableStateOf(false) }
+    var hasRequestedGalleryPermission by remember { mutableStateOf(false) }
+    // 永久拒绝权限时显示引导对话框
+    var showPermissionSettingsDialog by remember { mutableStateOf(false) }
+    var permissionSettingsMessage by remember { mutableStateOf("") }
 
     // 初始化编辑模式
     LaunchedEffect(editNoteId) {
@@ -139,6 +149,86 @@ fun CreateTravelScreen(
             }
         }
         cameraPhotoFile = null
+    }
+
+    /**
+     * 启动相机（已具备权限时调用）
+     * 国产ROM兼容：显式授予URI读写权限，避免部分系统裁剪/拍照时崩溃
+     */
+    val launchCamera: () -> Unit = {
+        try {
+            val photoFile = FileUtil.createImageFile(context)
+            cameraPhotoFile = photoFile
+            val photoUri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                photoFile
+            )
+            val resInfo = context.packageManager.queryIntentActivities(
+                Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE),
+                android.content.pm.PackageManager.MATCH_DEFAULT_ONLY
+            )
+            for (resolveInfo in resInfo) {
+                val packageName = resolveInfo.activityInfo.packageName
+                context.grantUriPermission(packageName, photoUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+            cameraLauncher.launch(photoUri)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            scope.launch {
+                snackbarHostState.showSnackbar("无法启动相机: ${e.message ?: "未知错误"}")
+            }
+        }
+    }
+
+    // 图库权限请求（兼容Android 13+ READ_MEDIA_IMAGES与老版本READ_EXTERNAL_STORAGE）
+    val galleryPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        hasRequestedGalleryPermission = true
+        val granted = permissions.values.any { it } ||
+            PermissionUtil.hasReadImagePermission(context)
+        if (granted) {
+            // 国产ROM兼容：即使返回false也可能授予了USER_SELECTED，再校验一次
+            galleryLauncher.launch("image/*")
+        } else {
+            // 用户拒绝了。判断是否被永久拒绝（部分国产ROM如MIUI可能直接永久拒绝）
+            val activity = context.findActivity()
+            val deniedPermanently = activity != null &&
+                PermissionUtil.isPermissionPermanentlyDenied(activity, PermissionUtil.getReadImagePermissions())
+            if (deniedPermanently) {
+                permissionSettingsMessage = "需要图片访问权限才能选择照片。您此前已选择\"不再询问\"，请到设置中手动开启权限。"
+                showPermissionSettingsDialog = true
+            } else {
+                scope.launch {
+                    snackbarHostState.showSnackbar("需要图片访问权限才能选择照片")
+                }
+            }
+        }
+    }
+
+    // 相机权限请求
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        hasRequestedCameraPermission = true
+        val granted = permissions.values.all { it }
+        if (granted) {
+            launchCamera()
+        } else {
+            val activity = context.findActivity()
+            val deniedPermanently = activity != null &&
+                PermissionUtil.isPermissionPermanentlyDenied(activity, PermissionUtil.getCameraPermissions())
+            if (deniedPermanently) {
+                permissionSettingsMessage = "需要相机权限才能拍照。您此前已选择\"不再询问\"，请到设置中手动开启权限。"
+                showPermissionSettingsDialog = true
+            } else {
+                scope.launch {
+                    snackbarHostState.showSnackbar("需要相机权限才能拍照")
+                }
+            }
+        }
     }
 
     // 保存
@@ -263,14 +353,14 @@ fun CreateTravelScreen(
                                     icon = Icons.Default.CameraAlt,
                                     label = stringResource(R.string.create_take_photo),
                                     onClick = {
-                                        val photoFile = FileUtil.createImageFile(context)
-                                        cameraPhotoFile = photoFile
-                                        val photoUri = FileProvider.getUriForFile(
-                                            context,
-                                            "${context.packageName}.fileprovider",
-                                            photoFile
-                                        )
-                                        cameraLauncher.launch(photoUri)
+                                        // 国产ROM兼容：先检查权限，避免无权限直接启动相机崩溃
+                                        if (PermissionUtil.hasCameraPermission(context)) {
+                                            launchCamera()
+                                        } else {
+                                            cameraPermissionLauncher.launch(
+                                                PermissionUtil.getCameraPermissions().toTypedArray()
+                                            )
+                                        }
                                     }
                                 )
                             }
@@ -281,7 +371,14 @@ fun CreateTravelScreen(
                                     icon = Icons.Default.PhotoLibrary,
                                     label = stringResource(R.string.create_select_photos),
                                     onClick = {
-                                        galleryLauncher.launch("image/*")
+                                        // 国产ROM兼容：先检查读图权限
+                                        if (PermissionUtil.hasReadImagePermission(context)) {
+                                            galleryLauncher.launch("image/*")
+                                        } else {
+                                            galleryPermissionLauncher.launch(
+                                                PermissionUtil.getReadImagePermissions().toTypedArray()
+                                            )
+                                        }
                                     }
                                 )
                             }
@@ -478,17 +575,52 @@ fun CreateTravelScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
                         .height(300.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(
-                        lineHeight = MaterialTheme.typography.bodyLarge.fontSize * 1.6f
-                    ),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary
-                    )
+                shape = RoundedCornerShape(12.dp),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                    lineHeight = MaterialTheme.typography.bodyLarge.fontSize * 1.6f
+                ),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.primary
                 )
-            }
+            )
         }
     }
+    }
+
+    // 永久拒绝权限时引导去系统设置开启
+    if (showPermissionSettingsDialog) {
+        AlertDialog(
+            onDismissRequest = { showPermissionSettingsDialog = false },
+            title = { Text("需要权限") },
+            text = { Text(permissionSettingsMessage) },
+            confirmButton = {
+                TextButton(onClick = {
+                    showPermissionSettingsDialog = false
+                    PermissionUtil.openAppSettings(context)
+                }) {
+                    Text("去设置", color = MaterialTheme.colorScheme.primary)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionSettingsDialog = false }) {
+                    Text(stringResource(R.string.detail_cancel))
+                }
+            }
+        )
+    }
+}
+
+/**
+ * 从Context中查找Activity（用于shouldShowRequestPermissionRationale）。
+ * 国产ROM兼容：Compose中LocalContext通常是Activity，但有时为ContextWrapper。
+ */
+private fun android.content.Context.findActivity(): android.app.Activity? {
+    var ctx = this
+    while (ctx is android.content.ContextWrapper) {
+        if (ctx is android.app.Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }
 
 @Composable
