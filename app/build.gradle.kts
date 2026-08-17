@@ -24,11 +24,11 @@ fun signingProp(name: String): String? {
 }
 
 android {
-    namespace = "com.youji.app"
+    namespace = "cn.hllcloud.youji"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.youji.app"
+        applicationId = "cn.hllcloud.youji"
         minSdk = 24
         targetSdk = 34
         versionCode = 2
@@ -74,7 +74,9 @@ android {
             isMinifyEnabled = false
             signingConfig =
                 signingConfigs.findByName("youji")
-                ?: error("Release build requires youji.* signing properties (storeFile/storePassword/keyAlias/keyPassword)")
+                    ?: signingConfigs.getByName("debug") // CI 本地无 youji 配置时，用 debug 签名兜底（CI 通过 secrets 注入 youji 配置后会被覆盖）
+            // 注：release 必须有 youji 签名才能正式发布，但 gradle 配置阶段不能抛异常（会影响 debug 构建）。
+            // CI workflow 在 release 构建前会显式校验 secrets 是否配置，缺失则 fail-fast。
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

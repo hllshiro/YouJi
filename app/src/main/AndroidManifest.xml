@@ -46,7 +46,7 @@
     </queries>
 
     <application
-        android:name=".YouJiApplication"
+        android:name="cn.hllcloud.youji.YouJiApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -61,7 +61,7 @@
         tools:targetApi="31">
 
         <activity
-            android:name=".MainActivity"
+            android:name="cn.hllcloud.youji.MainActivity"
             android:exported="true"
             android:theme="@style/Theme.YouJi">
             <intent-filter>
