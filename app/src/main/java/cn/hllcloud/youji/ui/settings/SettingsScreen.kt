@@ -78,6 +78,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import cn.hllcloud.youji.R
 import cn.hllcloud.youji.YouJiApplication
 import cn.hllcloud.youji.data.VlmSettings
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -630,12 +631,15 @@ private fun ModelSelectorField(
     val modelsState by viewModel.modelsState.collectAsStateWithLifecycle()
     val useCustomInput by viewModel.useCustomModelInput.collectAsStateWithLifecycle()
 
-    // 自动拉取模型列表：当 baseUrl 和 apiKey 都已填写，且 models 处于 Idle 时触发
+    // baseUrl 或 apiKey 变化时重新拉取模型列表。
+    // - 两者都已填写且非自定义模式：防抖 500ms 后触发拉取，避免每次按键都发请求
+    // - 任一为空：重置 modelsState，避免显示上一个 API 拉取到的旧模型列表
     LaunchedEffect(localSettings.apiUrl, localSettings.apiKey) {
-        if (localSettings.apiUrl.isNotBlank() && localSettings.apiKey.isNotBlank()) {
-            if (modelsState is SettingsViewModel.ModelsState.Idle && !useCustomInput) {
-                viewModel.fetchModels(localSettings)
-            }
+        if (localSettings.apiUrl.isNotBlank() && localSettings.apiKey.isNotBlank() && !useCustomInput) {
+            delay(500)
+            viewModel.fetchModels(localSettings)
+        } else if (localSettings.apiUrl.isBlank() || localSettings.apiKey.isBlank()) {
+            viewModel.resetModelsState()
         }
     }
 
@@ -671,8 +675,8 @@ private fun ModelSelectorField(
                 onClick = {
                     if (useCustomInput) {
                         viewModel.switchToDropdownModel()
-                        // 切回下拉时若 models 还是 Idle/Error，重新拉取
-                        if (modelsState !is SettingsViewModel.ModelsState.Success) {
+                        // 切回下拉时若 baseUrl/apiKey 已填，重新拉取，避免显示旧 API 的模型列表
+                        if (localSettings.apiUrl.isNotBlank() && localSettings.apiKey.isNotBlank()) {
                             viewModel.fetchModels(localSettings)
                         }
                     } else {

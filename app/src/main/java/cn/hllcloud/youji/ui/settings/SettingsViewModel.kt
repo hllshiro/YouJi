@@ -116,6 +116,14 @@ class SettingsViewModel(
     }
 
     /**
+     * 重置模型列表拉取状态为 Idle。
+     * 当 baseUrl 或 apiKey 被清空时调用，避免 UI 显示旧 API 拉取到的模型列表。
+     */
+    fun resetModelsState() {
+        _modelsState.value = ModelsState.Idle
+    }
+
+    /**
      * 用户主动切换为自定义输入模式（即使后续拉取成功也保持输入框）。
      */
     fun switchToCustomModelInput() {
