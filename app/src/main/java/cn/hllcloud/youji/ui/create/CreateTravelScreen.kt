@@ -26,8 +26,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -342,53 +340,68 @@ fun CreateTravelScreen(
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // 照片预览行
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            contentPadding = PaddingValues(vertical = 4.dp)
+                        // 拍照 + 图库按钮：横向并列，各占一半宽度
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            // 拍照按钮
-                            item {
-                                PhotoActionButton(
-                                    icon = Icons.Default.CameraAlt,
-                                    label = stringResource(R.string.create_take_photo),
-                                    onClick = {
-                                        // 国产ROM兼容：先检查权限，避免无权限直接启动相机崩溃
-                                        if (PermissionUtil.hasCameraPermission(context)) {
-                                            launchCamera()
-                                        } else {
-                                            cameraPermissionLauncher.launch(
-                                                PermissionUtil.getCameraPermissions().toTypedArray()
-                                            )
-                                        }
+                            PhotoActionButton(
+                                icon = Icons.Default.CameraAlt,
+                                label = stringResource(R.string.create_take_photo),
+                                onClick = {
+                                    // 国产ROM兼容：先检查权限，避免无权限直接启动相机崩溃
+                                    if (PermissionUtil.hasCameraPermission(context)) {
+                                        launchCamera()
+                                    } else {
+                                        cameraPermissionLauncher.launch(
+                                            PermissionUtil.getCameraPermissions().toTypedArray()
+                                        )
                                     }
-                                )
-                            }
-
-                            // 图库选择按钮
-                            item {
-                                PhotoActionButton(
-                                    icon = Icons.Default.PhotoLibrary,
-                                    label = stringResource(R.string.create_select_photos),
-                                    onClick = {
-                                        // 国产ROM兼容：先检查读图权限
-                                        if (PermissionUtil.hasReadImagePermission(context)) {
-                                            galleryLauncher.launch("image/*")
-                                        } else {
-                                            galleryPermissionLauncher.launch(
-                                                PermissionUtil.getReadImagePermissions().toTypedArray()
-                                            )
-                                        }
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            PhotoActionButton(
+                                icon = Icons.Default.PhotoLibrary,
+                                label = stringResource(R.string.create_select_photos),
+                                onClick = {
+                                    // 国产ROM兼容：先检查读图权限
+                                    if (PermissionUtil.hasReadImagePermission(context)) {
+                                        galleryLauncher.launch("image/*")
+                                    } else {
+                                        galleryPermissionLauncher.launch(
+                                            PermissionUtil.getReadImagePermissions().toTypedArray()
+                                        )
                                     }
-                                )
-                            }
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
 
-                            // 已选照片
-                            items(uiState.selectedPhotos, key = { it.id.takeIf { it != 0L } ?: it.filePath }) { photo ->
-                                SelectedPhotoItem(
-                                    photo = photo,
-                                    onRemove = { viewModel.removePhoto(photo) }
-                                )
+                        // 已选照片网格：每行3个，超过换行
+                        // 用 chunked + 普通 Row 渲染，避免 LazyRow 横向滑动与 Coil 异步加载的崩溃问题
+                        if (uiState.selectedPhotos.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            uiState.selectedPhotos.chunked(3).forEach { rowPhotos ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    rowPhotos.forEach { photo ->
+                                        SelectedPhotoItem(
+                                            photo = photo,
+                                            onRemove = { viewModel.removePhoto(photo) },
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                    // 最后一行不足3个时占位保持对齐
+                                    repeat(3 - rowPhotos.size) {
+                                        Spacer(modifier = Modifier.weight(1f))
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
                             }
                         }
                     }
@@ -627,11 +640,12 @@ private fun android.content.Context.findActivity(): android.app.Activity? {
 private fun PhotoActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Column(
-        modifier = Modifier
-            .size(96.dp)
+        modifier = modifier
+            .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
             .border(
                 width = 1.dp,
@@ -661,23 +675,26 @@ private fun PhotoActionButton(
 @Composable
 private fun SelectedPhotoItem(
     photo: PhotoEntity,
-    onRemove: () -> Unit
+    onRemove: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    Box(modifier = Modifier.size(96.dp)) {
+    Box(
+        modifier = modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+    ) {
         val painter = rememberAsyncImagePainter(model = File(photo.filePath))
         Image(
             painter = painter,
             contentDescription = null,
-            modifier = Modifier
-                .size(96.dp)
-                .clip(RoundedCornerShape(12.dp)),
+            modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop
         )
         if (painter.state is AsyncImagePainter.State.Loading) {
             Box(
                 modifier = Modifier
-                    .size(96.dp)
-                    .clip(RoundedCornerShape(12.dp))
+                    .fillMaxSize()
                     .background(MaterialTheme.colorScheme.surfaceVariant)
             )
         }
