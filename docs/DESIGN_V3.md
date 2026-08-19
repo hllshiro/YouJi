@@ -55,19 +55,21 @@ V2 设计了"选照片 → 自动地理反查 → 本地生成 → VLM 润色 �
 ╔══════════════════════════════════╗
 ║  正在生成游记...                  ║
 ║                                  ║
-║  ✅ 读取照片信息          已完成  ║
-║  ✅ 解析地理位置 (3/5)    已完成  ║
-║  ✅ 整理行程内容          已完成  ║
-║  ⏳ AI 生成游记...        进行中  ║
-║  ⬜ 保存游记              待执行  ║
+║  ✅ 读取照片信息            (1/5) ║
+║  ✅ 解析地理位置            (2/5) ║
+║  ✅ 整理行程内容            (3/5) ║
+║  ⏳ AI 生成游记...          (4/5) ║
+║  ⬜ 保存游记                (5/5) ║
 ║                                  ║
-║  ┌────────────────────────────┐  ║
-║  │ ████████████████░░░░  65%  │  ║
-║  └────────────────────────────┘  ║
-║                                  ║
-║  [取消生成]                      ║
+║  [暂停]                          ║
 ╚══════════════════════════════════╝
 ```
+
+**进度展示规则**：
+- 不使用百分比，不维护阶段权重
+- 直接用 `(当前阶段序号 / 总阶段数)` 显示，如 `(3/5)` 表示正在执行第 3 阶段，共 5 个阶段
+- 阶段前缀图标表示状态：✅ 已完成 / ⏳ 进行中 / ⬜ 待执行
+- Geocode 阶段额外显示内部进度：`(2/5) 解析中 (3/8 张)`，左侧为阶段序号，右侧为反查进度
 
 ### 2.3 任务恢复机制（调整）
 
@@ -199,18 +201,23 @@ APP 首次启动或检测到 VLM / 地理编码未配置时强制进入：
 
 **任务状态取值**：`pending / running / paused / completed / failed`。`paused` 用于标识"被外部打断、等待用户决策"的中间态，与 `running` 区分以避免启动时被误判为"在执行"。
 
-### 3.3 进度计算
+### 3.3 进度展示
+
+**不使用百分比，不维护阶段权重**，直接用阶段序号表示进度：
 
 ```
-总进度 = Σ(阶段权重 × 阶段进度)
-
-阶段权重：
-  Prepare:    0.05
-  Geocode:    0.25  (反查进度 = 已完成反查数 / 总照片数)
-  LocalGen:   0.10
-  VlmGen:     0.45  (VLM API 无法细分，按 0 或 1)
-  Save:       0.15
+当前阶段进度 = (current_phase_index + 1) / total_phases_count
+显示格式: "(N/M)"，如 "(3/5)" 表示正在执行第 3 阶段，共 5 个阶段
 ```
+
+各阶段在进度页的展示：
+- PREPARE: `(1/5) 读取照片信息`
+- GEOCODE: `(2/5) 解析地理位置 (已反查数/总照片数)` —— 内部还有反查粒度
+- LOCAL_GEN: `(3/5) 整理行程内容`
+- VLM_GEN: `(4/5) AI 生成游记`
+- SAVE: `(5/5) 保存游记`
+
+不计算聚合百分比，不维护跨阶段权重。Geocode 阶段的反查进度作为额外信息附加显示，不参与整体进度计算。
 
 ### 3.4 取消、暂停与重试
 
@@ -543,7 +550,8 @@ Column {
 ### 6.2 工作流进度页（新页面）
 
 - 全屏对话框（不可关闭），顶部显示阶段列表
-- 中间进度条
+- 每个阶段显示 `(N/M)` 序号 + 阶段名 + 状态图标，不显示百分比进度条
+- Geocode 阶段附加显示反查细粒度：`(2/5) 解析中 (3/8 张)`
 - 底部按钮区：
   - RUNNING 状态：显示「暂停」按钮（点击触发 `PauseConfirmDialog`）
   - PAUSED 状态：显示「恢复」按钮（直接续传，无需二次确认）
@@ -560,7 +568,7 @@ Column {
 ├── 内容展示区（标题/正文/照片/日期等，原有功能）
 └── 工作流状态区（仅在 travelNote.workflowTaskId != null 时显示）
     ├── 状态徽标（运行中 / 已暂停 / 已完成 / 失败）
-    ├── 进度条 + 当前阶段文本
+    ├── 阶段进度文本（"(3/5) 整理行程内容" 形式，无百分比）
     └── 操作按钮（按状态切换）
         ├── RUNNING：[暂停]
         ├── PAUSED：[恢复]  [放弃]
@@ -596,7 +604,10 @@ CREATE TABLE workflow_tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   status TEXT NOT NULL DEFAULT 'pending',
   current_phase TEXT NOT NULL DEFAULT 'prepare',
-  progress REAL NOT NULL DEFAULT 0.0,
+  current_phase_index INTEGER NOT NULL DEFAULT 0,  -- 当前阶段序号（0-based），用于 (N/M) 展示
+  total_phases INTEGER NOT NULL DEFAULT 5,          -- 总阶段数，默认 5
+  geocode_done_count INTEGER NOT NULL DEFAULT 0,    -- Geocode 阶段已反查数（额外细粒度）
+  geocode_total_count INTEGER NOT NULL DEFAULT 0,  -- Geocode 阶段总照片数
   selected_style_id INTEGER,
   selected_style_name TEXT,
   input_photo_paths TEXT NOT NULL,
