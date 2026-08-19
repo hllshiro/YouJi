@@ -165,13 +165,16 @@ APP 首次启动或检测到 VLM / 地理编码未配置时强制进入：
 ```
 阶段 1: 准备（Prepare）
   - 扫描照片 EXIF，提取 lat/long/takenAt
-  - 写入 PhotoEntity 内存列表
+  - 创建 PhotoEntity 入库，关联 workflowTaskId（不关联 travelNoteId）
+  - result_json 记录 photo_ids 列表，供后续阶段定位
   ↓
 阶段 2: 地理反查（Geocode）
-  - 批量 reverseGeocode，写入 PhotoEntity.locationName
+  - 从 photoDao.getByWorkflowTaskId(taskId) 读取 PhotoEntity
+  - 对有 lat/long 的逐个反查，update locationName
   - 进度: 已反查/总数
   ↓
 阶段 3: 本地生成（LocalGenerate）
+  - 从 photoDao.getByWorkflowTaskId(taskId) 读取已含 locationName 的 PhotoEntity
   - LocalContentGenerator.generateContent(photos, style)
   - 输出: title, content, locationSummary, dateRange
   ↓
@@ -181,7 +184,8 @@ APP 首次启动或检测到 VLM / 地理编码未配置时强制进入：
   - VLM 调用失败时任务标记为 FAILED，由用户决定重试或放弃（不自动降级）
   ↓
 阶段 5: 保存（Save）
-  - TravelNoteEntity + PhotoEntity 入库
+  - 创建 TravelNoteEntity 入库
+  - photoDao.rebindToNote(taskId, noteId)：把照片从 workflowTaskId 解绑，改关联到新游记 ID
   - 标记任务完成
 ```
 
@@ -291,11 +295,33 @@ CREATE TABLE workflow_phase_results (
 
 | 阶段 | result_json 示例 | 说明 |
 |------|-----------------|------|
-| prepare | `{"photo_count": 5, "has_gps": 3}` | 照片统计 |
-| geocode | `{"geocoded": 5, "failed": 0}` | 反查结果统计，PhotoEntity 的 locationName 已单独写入 |
+| prepare | `{"photo_ids": [1,2,3,4,5], "has_gps": 3}` | **PhotoEntity 已入库**，记录 id 列表和有 GPS 的张数；后续阶段通过 `photoDao.getByWorkflowTaskId(taskId)` 查询 |
+| geocode | `{"geocoded": 5, "failed": 0}` | 反查结果统计，PhotoEntity 的 locationName 已通过 update 写入对应行 |
 | local_gen | `{"title": "郑州3日游", "content": "...", "locationSummary": "郑州", "startDate": 1755273600000, "endDate": 1755446400000}` | 本地生成产物 |
 | vlm_gen | `{"content": "...", "success": true}` | VLM 生成产物 |
-| save | `{"note_id": 42}` | 保存结果 |
+| save | `{"note_id": 42}` | 保存结果，PhotoEntity 此时从 workflowTaskId 解绑，改为关联 travelNoteId |
+
+#### PhotoEntity 与 workflow_task 的关联（关键修正）
+
+Prepare 阶段就把 PhotoEntity 入库，关联到 workflow_task：
+
+```kotlin
+data class PhotoEntity(
+    // ... 原有字段 ...
+    val travelNoteId: Long? = null,        // 关联游记（Save 阶段后才有值）
+    val workflowTaskId: Long? = null,      // 关联工作流任务（Prepare 阶段写入，Save 阶段清空）
+)
+```
+
+**各阶段读取路径**：
+- Geocode: `photoDao.getByWorkflowTaskId(taskId)` → 拿到所有 PhotoEntity → 对有 lat/long 的逐个反查 → `photoDao.updateLocationName(photo.id, address)`
+- LocalGen: 同样从 `getByWorkflowTaskId` 读取，此时 locationName 已写入
+- VlmGen: 同上
+- Save: 创建 TravelNoteEntity 入库 → `photoDao.rebindToNote(taskId, noteId)` → 把 workflowTaskId 改为 null，travelNoteId 改为新游记 ID
+
+**为什么不在 result_json 里塞 PhotoEntity 列表**：
+- locationName 在 Geocode 阶段异步写入，若塞进 JSON 后续无法 update
+- 直接走 Room 的 update 行级更新更可靠，恢复时无需重放反查
 
 #### TravelNoteEntity 扩展
 
@@ -349,9 +375,9 @@ APP 启动
 
 ### 4.3 中间数据缓存策略
 
-- **PhotoEntity**：反查完成后立即入库（`locationName` 字段），不依赖内存
+- **PhotoEntity**：Prepare 阶段就入库（关联 `workflowTaskId`），Geocode 阶段反查后直接 update `locationName` 行级更新。这样任务被杀后恢复时，已反查的照片不丢失 locationName。
 - **生成结果**：`local_gen` 和 `vlm_gen` 阶段的产物存入 `workflow_phase_results.result_json`
-- **缓存清理**：任务完成后保留 7 天，自动清理；任务被放弃时立即清理
+- **缓存清理**：任务完成后保留 7 天，自动清理；任务被放弃时立即清理（PhotoEntity 一并删除，避免遗留孤儿照片记录）
 - **存储空间**：仅存储文本结果（几 KB），图片文件仍按原方式管理
 
 ### 4.4 防重复执行
@@ -450,16 +476,44 @@ suspend fun start(photoPaths, style, onProgress): Long {
 }
 ```
 
-### 5.3 Geocode 阶段并行优化
+### 5.3 Prepare 阶段实现
+
+```kotlin
+private suspend fun runPrepare(taskId: Long, photoPaths: List<String>): PrepareResult {
+    val photos = photoPaths.map { path ->
+        val meta = ExifUtil.readMetadata(path)
+        PhotoEntity(
+            filePath = path,
+            fileName = File(path).name,
+            takenAt = meta.takenAt,
+            latitude = meta.latitude,
+            longitude = meta.longitude,
+            exifMake = meta.make,
+            exifModel = meta.model,
+            workflowTaskId = taskId,   // 关键：关联到任务，不关联游记
+            travelNoteId = null
+        )
+    }
+    val ids = photoDao.insertAll(photos)
+    val hasGps = photos.count { it.latitude != null && it.longitude != null }
+    return PrepareResult(photoIds = ids, hasGps = hasGps)
+}
+```
+
+### 5.4 Geocode 阶段并行优化
 
 反查是 IO 密集操作，采用并发 + 节流：
 
 ```kotlin
 private suspend fun runGeocode(taskId: Long) {
-    val photos = photoDao.getByTask(taskId)
-    val scope = CoroutineScope(Dispatchers.IO)
+    val photos = photoDao.getByWorkflowTaskId(taskId)
+    val needGeocode = photos.filter { it.latitude != null && it.longitude != null }
 
-    photos.map { photo ->
+    // 部分恢复场景：跳过已反查的
+    val pending = needGeocode.filter { it.locationName == null }
+
+    val scope = CoroutineScope(Dispatchers.IO)
+    pending.map { photo ->
         scope.async {
             val result = geocoderService.reverse(photo.latitude!!, photo.longitude!!)
             result.onSuccess { address ->
@@ -468,8 +522,7 @@ private suspend fun runGeocode(taskId: Long) {
         }
     }.awaitAll()
 
-    // 更新已反查的 PhotoEntity 到内存状态
-    val completed = photoDao.getByTask(taskId)
+    val completed = photoDao.getByWorkflowTaskId(taskId)
     emitProgress(geocodedCount = completed.count { it.locationName != null })
 }
 ```
@@ -477,7 +530,7 @@ private suspend fun runGeocode(taskId: Long) {
 **并发度**：3 个协程并行（兼顾速度与 Geocoder 限流）
 **Nominatim 特判**：若回退到 Nominatim，强制串行（1.1s 间隔）
 
-### 5.4 VLM 执行逻辑（不降级）
+### 5.5 VLM 执行逻辑（不降级）
 
 ```kotlin
 private suspend fun runVlmGen(taskId: Long, style: WritingStyle) {
@@ -489,7 +542,7 @@ private suspend fun runVlmGen(taskId: Long, style: WritingStyle) {
         ?.resultJson?.let { parseGeneratedContent(it) }
         ?: throw IllegalStateException("本地生成阶段未完成")
 
-    val photos = photoDao.getByTask(taskId)
+    val photos = photoDao.getByWorkflowTaskId(taskId)
     val vlmResult = vlmClient.generateTravelContent(vlmSettings, photos, style)
 
     vlmResult.onSuccess { content ->
@@ -502,6 +555,48 @@ private suspend fun runVlmGen(taskId: Long, style: WritingStyle) {
         throw e
     }
 }
+```
+
+### 5.6 Save 阶段实现
+
+```kotlin
+private suspend fun runSave(taskId: Long): Long {
+    val task = taskDao.getById(taskId)
+    val localResult = phaseResultDao.getByTaskAndPhase(taskId, "local_gen")
+        ?.resultJson?.let { parseGeneratedContent(it) }
+    val vlmResult = phaseResultDao.getByTaskAndPhase(taskId, "vlm_gen")
+        ?.resultJson?.let { parseGeneratedContent(it) }
+
+    val finalContent = vlmResult ?: localResult
+        ?: throw IllegalStateException("生成阶段未完成")
+
+    val photos = photoDao.getByWorkflowTaskId(taskId)
+    val noteEntity = TravelNoteEntity(
+        title = finalContent.title,
+        content = finalContent.content,
+        coverPhotoPath = finalContent.coverPhotoPath ?: photos.firstOrNull()?.filePath,
+        startDate = finalContent.startDate,
+        endDate = finalContent.endDate,
+        locationSummary = finalContent.locationSummary,
+        isGeneratedByVlm = vlmResult != null,
+        writingStyleId = task.selectedStyleId,
+        writingStyleName = task.selectedStyleName,
+        workflowTaskId = taskId
+    )
+
+    val noteId = repository.createTravelNote(noteEntity)
+    // 关键：把照片从 workflowTaskId 解绑，改关联到新游记
+    photoDao.rebindToNote(taskId, noteId)
+    taskDao.updateCreatedNoteId(taskId, noteId)
+    return noteId
+}
+```
+
+`rebindToNote` 实现：
+```sql
+UPDATE photos
+SET travelNoteId = :noteId, workflowTaskId = NULL
+WHERE workflowTaskId = :taskId
 ```
 
 ---
@@ -655,12 +750,28 @@ val writingStyleName: String? = null,
 val workflowTaskId: Long? = null,
 ```
 
-**PhotoEntity** 使用已有字段：
+**PhotoEntity** 扩展字段：
 ```kotlin
-// latitude / longitude / locationName 已存在，V3 真正写入
-val latitude: Double? = null,
-val longitude: Double? = null,
-val locationName: String? = null,
+// 已有字段：latitude / longitude / locationName（V3 真正写入）
+// 新增字段：workflowTaskId（Prepare 阶段写入，Save 阶段清空）
+val workflowTaskId: Long? = null,
+```
+
+Room migration：新增 `workflow_task_id` 列允许 null，老数据兼容（老数据的照片都已关联游记，workflowTaskId 始终为 null）。
+
+新增 DAO 方法：
+```kotlin
+@Query("SELECT * FROM photos WHERE workflowTaskId = :taskId")
+suspend fun getByWorkflowTaskId(taskId: Long): List<PhotoEntity>
+
+@Query("UPDATE photos SET locationName = :name WHERE id = :photoId")
+suspend fun updateLocationName(photoId: Long, name: String)
+
+@Query("UPDATE photos SET travelNoteId = :noteId, workflowTaskId = NULL WHERE workflowTaskId = :taskId")
+suspend fun rebindToNote(taskId: Long, noteId: Long)
+
+@Insert
+suspend fun insertAll(photos: List<PhotoEntity>): List<Long>
 ```
 
 ### 7.3 SharedPreferences
