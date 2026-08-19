@@ -10,25 +10,27 @@ V2 设计了"选照片 → 自动地理反查 → 本地生成 → VLM 润色 �
 
 | # | 需求 | 说明 |
 |---|------|------|
-| R1 | **页面精简** | 创建游记页仅保留：照片选择区 + 风格选择区 + 保存按钮。移除标题、日期、正文输入框和生成按钮 |
-| R2 | **自动工作流** | 点击保存后，APP 自动执行完整工作流（地理反查 → 本地生成 → VLM 生成 → 入库），全程无需用户干预 |
-| R3 | **进度管理** | 工作流各阶段实时显示进度，用户可随时查看当前执行到哪一步 |
+| R1 | **页面精简** | 创建游记页仅保留：照片选择区 + 风格选择区 + 操作按钮（保存草稿/开始生成）。移除标题、日期、正文输入框和生成按钮 |
+| R2 | **手动启动工作流** | 用户点击「开始生成」后，APP 自动执行完整工作流（地理反查 → 本地生成 → VLM 生成 → 入库），全程无需用户干预。保存草稿不触发工作流 |
+| R3 | **进度管理** | 工作流各阶段实时显示 `(N/M)` 序号进度，用户可随时查看当前执行到哪一步 |
 | R4 | **任务持久化** | 工作流中间结果写入本地数据库，APP 被关闭后下次启动时能恢复未完成任务 |
 | R5 | **风格选择** | 保留 V2 设计的纪实/美化两种内置风格 + 自定义风格管理 |
+| R6 | **增量优化** | 编辑场景下 GEOCODE 只处理新增图片，VLM 只处理增量 diff，省钱省时 |
 
 ### 1.3 设计原则
 
-- **Save ≠ Start**：保存按钮只持久化草稿（照片列表 + 风格），不自动启动工作流；用户在草稿页/详情页主动点击「开始生成」才启动。这样执行前的修改完全不触发任何后台调用。
+- **Save ≠ Start**：保存草稿只持久化照片列表 + 风格选择，不启动工作流。用户主动点「开始生成」才启动。执行前的编辑完全不触发任何后台调用。
 - **不丢数据**：任何阶段崩溃/退出，已完成的中间结果可恢复
-- **用户可中断**：运行中的任务可取消，已完成的阶段不回滚
+- **用户可中断**：运行中的任务可暂停（带二次确认）或放弃，已完成的阶段不回滚
 - **强制配置**：VLM API 和地理编码服务为**必须项**，未配置完成不允许启动工作流；首次启动进入引导页强制完成两项配置后才可使用主功能
-- **增量优化**：编辑场景下 GEOCODE 只处理新增图片，VLM 只处理增量（新增/删除 diff），省钱省时
+- **不降级**：VLM 阶段失败不自动降级到本地生成，任务标记为 FAILED 等待用户决策
+- **增量优化**：编辑场景下 GEOCODE 只处理新增图片，VLM 只处理增量 diff，最大化复用已有结果以省钱省时
 
 ---
 
-## 2. 页面重构
+## 2. 页面与交互
 
-### 2.1 创建游记页（Before → After）
+### 2.1 创建游记页
 
 **Before（V2 现状）：**
 ```
@@ -48,12 +50,17 @@ V2 设计了"选照片 → 自动地理反查 → 本地生成 → VLM 润色 �
 [保存草稿]  [开始生成]
 ```
 
-- 「保存草稿」：仅持久化照片列表 + 风格选择到 workflow_task（状态 `pending`），不触发任何后台调用。用户可在草稿页继续增删照片、换风格，反复保存无副作用。
-- 「开始生成」：校验配置通过后启动工作流，进入进度页。仅 pending 状态可点击；running/paused 状态此按钮禁用（避免重复启动）。
+**操作按钮**：
+- **保存草稿**：仅持久化照片列表 + 风格选择到 workflow_task（状态 `pending`），不触发任何后台调用。用户可在草稿页继续增删照片、换风格，反复保存无副作用。
+- **开始生成**：校验配置通过后启动工作流，进入进度页。仅 `pending` 状态可点击；`running`/`paused` 状态此按钮禁用（避免重复启动）。
 
-### 2.2 工作流进度页（新增）
+**移除的组件**：标题输入框、日期范围选择卡、正文输入框、智能生成/VLM生成按钮、生成进度条（移到独立进度页）、VLM 提示 Chip。
 
-点击保存后进入全屏进度页，实时展示：
+**保留的组件**：照片选择区（拍照 + 图库 + 3列网格）、风格选择行、操作按钮组。
+
+### 2.2 工作流进度页（新页面）
+
+全屏对话框（不可关闭），点击「开始生成」后进入：
 
 ```
 ╔══════════════════════════════════╗
@@ -73,22 +80,64 @@ V2 设计了"选照片 → 自动地理反查 → 本地生成 → VLM 润色 �
 - 不使用百分比，不维护阶段权重
 - 直接用 `(当前阶段序号 / 总阶段数)` 显示，如 `(3/5)` 表示正在执行第 3 阶段，共 5 个阶段
 - 阶段前缀图标表示状态：✅ 已完成 / ⏳ 进行中 / ⬜ 待执行
-- Geocode 阶段额外显示内部进度：`(2/5) 解析中 (3/8 张)`，左侧为阶段序号，右侧为反查进度
+- Geocode 阶段额外显示反查细粒度：`(2/5) 解析中 (3/8 张)`
 
-### 2.3 任务恢复机制（调整）
+**底部按钮按任务状态切换**：
+- `running`：显示「暂停」按钮（点击触发 `PauseConfirmDialog`）
+- `paused`：显示「恢复」按钮（直接续传，无需二次确认）
+- `completed`：显示「完成」按钮（跳转详情页）
+- `failed`：显示「重试」/「放弃」按钮
 
-**不再启动时弹框打断用户**，改为"首页展示 + 用户主动恢复"：
+任务完成后自动关闭，跳转到游记详情页。
+
+### 2.3 游记详情页（扩展）
+
+详情页在原有展示功能基础上，根据关联的 `workflowTaskId` 状态显示对应操作区：
+
+```
+游记详情页
+├── 内容展示区（标题/正文/照片/日期等，原有功能）
+└── 工作流状态区（仅在 travelNote.workflowTaskId != null 时显示）
+    ├── 状态徽标（草稿 / 运行中 / 已暂停 / 已完成 / 失败）
+    ├── 阶段进度文本（"(3/5) 整理行程内容" 形式，无百分比）
+    └── 操作按钮（按状态切换）
+        ├── PENDING（草稿）：[开始生成]  [编辑照片]
+        ├── RUNNING：[暂停]
+        ├── PAUSED：[恢复]  [放弃]  [编辑照片]
+        ├── COMPLETED：[增量更新]  [编辑照片]
+        └── FAILED：[重试]  [放弃]
+```
+
+**按钮行为**：
+- **开始生成** → 校验配置后启动工作流，进入进度页
+- **暂停** → 触发 `PauseConfirmDialog`，确认后任务改 `paused`
+- **恢复** → 任务改 `running`，从 `current_phase` 续传，UI 切换到进度反馈模式
+- **重试** → 失败阶段重新执行，其他已完成阶段跳过
+- **放弃** → 任务标记 `failed`，清理中间数据，游记本体保留（若 Save 阶段已部分完成）
+- **编辑照片** → 进入照片编辑模式（增删照片），保存后根据当前任务状态触发对应编辑流程（详见 5 节）
+- **增量更新** → 任务完成后用户编辑了照片或正文，点击此按钮触发增量生成（详见 5.3 节）
+
+**编辑权限**：
+- 任务 `running` 时只读，避免与 AI 生成结果冲突
+- 任务 `pending`/`paused`/`completed` 后允许用户编辑正文和照片
+- 任务 `pending` 状态等同于"草稿"，此时「保存草稿」无意义（已入库），主操作变为「开始生成」
+
+**设计要点**：进度页和详情页共用同一套工作流状态 ViewModel，避免逻辑重复。详情页的"恢复"与首页"待恢复"区块的"恢复"完全一致，调用同一个 `WorkflowEngine.resume()`。
+
+### 2.4 任务恢复机制
+
+**核心原则**：不打断用户。启动时静默标记，由用户在主页主动决定是否恢复。
 
 #### 启动行为
 
 APP 启动时执行 `markUnfinishedTasksAsPaused()`：
 - 扫描 `workflow_tasks` 表中 `status ∈ ('pending', 'running')` 的任务
-- 全部标记为 `paused`，并记录 `current_phase`（用于恢复时知道从哪个阶段继续）
+- 全部更新为 `paused`，保留 `current_phase` 字段不动（用于恢复时知道从哪个阶段继续）
 - 静默完成，不弹任何对话框
 
-#### 首页入口
+#### 首页待恢复区块
 
-主页顶部展示"待恢复任务"区块（仅当存在 paused 任务时显示）：
+主页顶部展示"待恢复任务"区块（仅当存在 `paused` 任务时显示）：
 
 ```
 ╔══════════════════════════════════╗
@@ -101,15 +150,15 @@ APP 启动时执行 `markUnfinishedTasksAsPaused()`：
 ╚══════════════════════════════════╝
 ```
 
-- 点击任务卡片 → 直接恢复该任务（任务状态改为 `running`，从 `current_phase` 续传）
-- 点击"恢复全部" → 顺序恢复所有 paused 任务
+- 点击任务卡片 → 直接恢复该任务（任务状态改 `running`，从 `current_phase` 续传）。恢复是"无副作用"操作（从断点继续），不需要二次确认。
+- 点击"恢复全部" → 顺序恢复所有 `paused` 任务（一个完成再启动下一个，避免并发冲突）
 - 点击"管理" → 进入任务管理列表，可单独恢复/暂停/放弃
 
-#### 手动暂停（替代原"继续/忽略"对话框）
+#### 手动暂停
 
-任务执行过程中支持用户主动暂停，不再使用"继续/忽略"二选一弹窗：
+任务执行过程中支持用户主动暂停。
 
-**触发方式**：进度页右下角「暂停」按钮 / 任务管理列表的「暂停」开关
+**触发位置**：进度页右下角「暂停」按钮 / 详情页的「暂停」按钮 / 任务管理列表的「暂停」开关
 
 **确认对话框**（暂停前强制弹出）：
 
@@ -127,11 +176,11 @@ APP 启动时执行 `markUnfinishedTasksAsPaused()`：
 ```
 
 - **取消** → 关闭对话框，任务继续执行
-- **确定暂停** → 任务状态改为 `paused`，等待当前阶段安全停止点后中断（不强制打断网络请求），返回主页
+- **确定暂停** → 任务状态改 `paused`，当前阶段到达安全停止点后中断（不强制打断网络请求），返回主页
 
-**恢复方式**：暂停后的任务与启动时标记为 paused 的任务同等对待，从主页"待恢复"区块点击恢复即可。
+暂停产生的 `paused` 任务和启动时自动标记的 `paused` 任务处理逻辑完全一致，都从主页"待恢复"区块恢复继续执行。
 
-### 2.4 首次启动配置引导页（新增）
+### 2.5 首次启动配置引导页
 
 APP 首次启动或检测到 VLM / 地理编码未配置时强制进入：
 
@@ -162,9 +211,162 @@ APP 首次启动或检测到 VLM / 地理编码未配置时强制进入：
 
 ---
 
-## 3. 工作流引擎设计
+## 3. 数据模型
 
-### 3.1 工作流阶段定义
+### 3.1 新增表
+
+#### workflow_tasks（工作流任务主表）
+
+```sql
+CREATE TABLE workflow_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  status TEXT NOT NULL DEFAULT 'pending',         -- 'pending' | 'running' | 'paused' | 'completed' | 'failed'
+  current_phase TEXT NOT NULL DEFAULT 'prepare',  -- 'prepare' | 'geocode' | 'local_gen' | 'vlm_gen' | 'save'
+  current_phase_index INTEGER NOT NULL DEFAULT 0, -- 当前阶段序号（0-based），用于 (N/M) 展示
+  total_phases INTEGER NOT NULL DEFAULT 5,         -- 总阶段数，默认 5
+  geocode_done_count INTEGER NOT NULL DEFAULT 0,  -- Geocode 阶段已反查数（额外细粒度）
+  geocode_total_count INTEGER NOT NULL DEFAULT 0, -- Geocode 阶段总照片数
+  selected_style_id INTEGER,                      -- 选中的风格 ID
+  selected_style_name TEXT,                        -- 冗余存储风格名
+  input_photo_paths TEXT NOT NULL,                 -- JSON: ["path1", "path2", ...]
+  created_note_id INTEGER,                         -- 若已保存则关联游记 ID
+  error_message TEXT,                              -- 失败原因
+  has_pending_edit INTEGER NOT NULL DEFAULT 0,     -- 是否有未应用的编辑（0/1）
+  last_diff_json TEXT,                             -- 上次编辑 diff（added/removed id 列表）
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+```
+
+#### workflow_phase_results（阶段中间结果）
+
+```sql
+CREATE TABLE workflow_phase_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  phase TEXT NOT NULL,                            -- 'prepare' | 'geocode' | 'local_gen' | 'vlm_gen' | 'save'
+  status TEXT NOT NULL DEFAULT 'pending',        -- 'pending' | 'running' | 'completed' | 'failed'
+  result_json TEXT,                              -- 阶段产物 JSON（见 3.3 节）
+  error_message TEXT,
+  phase_version INTEGER NOT NULL DEFAULT 1,      -- 每次编辑后递增，追踪结果版本
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(task_id, phase)
+)
+```
+
+#### writing_styles（写作风格表，V2 设计保留）
+
+```sql
+CREATE TABLE writing_styles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  prompt_guideline TEXT NOT NULL,
+  opening_tone TEXT,
+  closing_tone TEXT,
+  is_builtin INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+)
+```
+
+### 3.2 扩展表
+
+#### TravelNoteEntity 新增字段
+
+```kotlin
+val writingStyleId: Long? = null,
+val writingStyleName: String? = null,
+val workflowTaskId: Long? = null,  // 关联的工作流任务 ID
+```
+
+#### PhotoEntity 扩展字段
+
+```kotlin
+// 已有字段（V3 真正写入）：
+val latitude: Double? = null,
+val longitude: Double? = null,
+val locationName: String? = null,
+
+// 新增字段：
+val workflowTaskId: Long? = null,  // Prepare 阶段写入，Save 阶段清空
+```
+
+Room migration：新增 `workflow_task_id` 列允许 null，老数据兼容（老数据的照片都已关联游记，workflowTaskId 始终为 null）。
+
+#### PhotoDao 新增方法
+
+```kotlin
+@Query("SELECT * FROM photos WHERE workflowTaskId = :taskId")
+suspend fun getByWorkflowTaskId(taskId: Long): List<PhotoEntity>
+
+@Query("UPDATE photos SET locationName = :name WHERE id = :photoId")
+suspend fun updateLocationName(photoId: Long, name: String)
+
+@Query("UPDATE photos SET travelNoteId = :noteId, workflowTaskId = NULL WHERE workflowTaskId = :taskId")
+suspend fun rebindToNote(taskId: Long, noteId: Long)
+
+@Insert
+suspend fun insertAll(photos: List<PhotoEntity>): List<Long>
+```
+
+### 3.3 各阶段 result_json 结构
+
+| 阶段 | result_json 示例 | 说明 |
+|------|-----------------|------|
+| prepare | `{"photo_ids": [1,2,3,4,5], "has_gps": 3}` | PhotoEntity 已入库，记录 id 列表和有 GPS 的张数；后续阶段通过 `photoDao.getByWorkflowTaskId(taskId)` 查询 |
+| geocode | `{"geocoded": 5, "failed": 0}` | 反查结果统计，PhotoEntity 的 locationName 已通过 update 写入对应行 |
+| local_gen | `{"title": "郑州3日游", "content": "...", "locationSummary": "郑州", "startDate": 1755273600000, "endDate": 1755446400000}` | 本地生成产物 |
+| vlm_gen | `{"content": "...", "success": true}` | VLM 生成产物 |
+| save | `{"note_id": 42}` | 保存结果，PhotoEntity 此时从 workflowTaskId 解绑，改为关联 travelNoteId |
+
+**为什么不在 result_json 里塞 PhotoEntity 列表**：
+- locationName 在 Geocode 阶段异步写入，若塞进 JSON 后续无法 update
+- 直接走 Room 的 update 行级更新更可靠，恢复时无需重放反查
+
+### 3.4 PhotoEntity 与 workflow_task 的关联
+
+Prepare 阶段就把 PhotoEntity 入库，关联到 workflow_task：
+
+```kotlin
+data class PhotoEntity(
+    // ... 原有字段 ...
+    val travelNoteId: Long? = null,        // 关联游记（Save 阶段后才有值）
+    val workflowTaskId: Long? = null,      // 关联工作流任务（Prepare 阶段写入，Save 阶段清空）
+)
+```
+
+**各阶段读取路径**：
+- Geocode: `photoDao.getByWorkflowTaskId(taskId)` → 拿到所有 PhotoEntity → 对有 lat/long 的逐个反查 → `photoDao.updateLocationName(photo.id, address)`
+- LocalGen: 同样从 `getByWorkflowTaskId` 读取，此时 locationName 已写入
+- VlmGen: 同上
+- Save: 创建 TravelNoteEntity 入库 → `photoDao.rebindToNote(taskId, noteId)` → 把 workflowTaskId 改为 null，travelNoteId 改为新游记 ID
+
+### 3.5 中间数据缓存策略
+
+- **PhotoEntity**：Prepare 阶段就入库（关联 `workflowTaskId`），Geocode 阶段反查后直接 update `locationName` 行级更新。任务被杀后恢复时，已反查的照片不丢失 locationName。
+- **生成结果**：`local_gen` 和 `vlm_gen` 阶段的产物存入 `workflow_phase_results.result_json`
+- **缓存清理**：任务完成后保留 7 天自动清理；任务被放弃时立即清理（PhotoEntity 一并删除，避免遗留孤儿照片记录）
+- **存储空间**：仅存储文本结果（几 KB），图片文件仍按原方式管理
+
+### 3.6 防重复执行
+
+每个阶段开始前检查 `workflow_phase_results` 表，已完成则跳过：
+
+```kotlin
+suspend fun executePhase(taskId: Long, phase: Phase): PhaseResult {
+    val existing = phaseResultDao.getByTaskAndPhase(taskId, phase.name)
+    if (existing?.status == "completed") {
+        return PhaseResult.Skip(existing.resultJson)
+    }
+    return doExecute(phase)
+}
+```
+
+---
+
+## 4. 工作流引擎
+
+### 4.1 工作流阶段定义
 
 ```
 阶段 1: 准备（Prepare）
@@ -193,7 +395,7 @@ APP 首次启动或检测到 VLM / 地理编码未配置时强制进入：
   - 标记任务完成
 ```
 
-### 3.2 阶段状态机
+### 4.2 阶段状态机
 
 ```
   IDLE ──→ RUNNING ──→ COMPLETED
@@ -209,7 +411,7 @@ APP 首次启动或检测到 VLM / 地理编码未配置时强制进入：
 
 **任务状态取值**：`pending / running / paused / completed / failed`。`paused` 用于标识"被外部打断、等待用户决策"的中间态，与 `running` 区分以避免启动时被误判为"在执行"。
 
-### 3.3 进度展示
+### 4.3 进度展示
 
 **不使用百分比，不维护阶段权重**，直接用阶段序号表示进度：
 
@@ -227,14 +429,7 @@ APP 首次启动或检测到 VLM / 地理编码未配置时强制进入：
 
 不计算聚合百分比，不维护跨阶段权重。Geocode 阶段的反查进度作为额外信息附加显示，不参与整体进度计算。
 
-### 3.4 取消、暂停与重试
-
-- **取消（放弃）**：调用 `abandon()` 后，任务标记为 `failed`，清理中间数据。与暂停不同，放弃后任务不可恢复。
-- **暂停**：调用 `pause()` 后，当前阶段完成当前可中断点后停止（不强制中断网络请求）。已完成阶段的中间结果保留，任务状态改为 `paused`。暂停后可通过主页恢复继续执行。
-- **重试**：失败阶段可单独重试，无需从头开始。
-- **不降级**：VLM 阶段失败不自动降级到本地生成结果，任务标记为 FAILED 等待用户决策（重试或放弃）。
-
-### 3.5 启动前置校验
+### 4.4 启动前置校验
 
 `WorkflowEngine.start()` 调用前必须先通过配置校验：
 
@@ -255,162 +450,17 @@ fun canStartWorkflow(): WorkflowStartCheck {
 
 校验未通过时，UI 强制跳转到设置引导页，不允许用户进入创建游记流程。
 
----
-
-## 4. 任务持久化
-
-### 4.1 数据模型
-
-#### WorkflowTask（新表）
-
-```sql
-CREATE TABLE workflow_tasks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  status TEXT NOT NULL,           -- 'pending' | 'running' | 'paused' | 'completed' | 'failed'
-  current_phase TEXT NOT NULL,    -- 'prepare' | 'geocode' | 'local_gen' | 'vlm_gen' | 'save'
-  progress REAL NOT NULL DEFAULT 0.0,  -- 0.0 ~ 1.0
-  selected_style_id INTEGER,      -- 选中的风格 ID
-  selected_style_name TEXT,       -- 冗余存储风格名
-  input_photo_paths TEXT NOT NULL, -- JSON: ["path1", "path2", ...]
-  created_note_id INTEGER,        -- 若已保存则关联游记 ID
-  error_message TEXT,             -- 失败原因
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-)
-```
-
-#### WorkflowPhaseResult（新表，存储每阶段的中间结果）
-
-```sql
-CREATE TABLE workflow_phase_results (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id INTEGER NOT NULL,
-  phase TEXT NOT NULL,            -- 'prepare' | 'geocode' | 'local_gen' | 'vlm_gen' | 'save'
-  status TEXT NOT NULL,           -- 'pending' | 'running' | 'completed' | 'failed'
-  result_json TEXT,               -- 阶段产物 JSON（见下方说明）
-  error_message TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  UNIQUE(task_id, phase)
-)
-```
-
-#### 各阶段 result_json 结构
-
-| 阶段 | result_json 示例 | 说明 |
-|------|-----------------|------|
-| prepare | `{"photo_ids": [1,2,3,4,5], "has_gps": 3}` | **PhotoEntity 已入库**，记录 id 列表和有 GPS 的张数；后续阶段通过 `photoDao.getByWorkflowTaskId(taskId)` 查询 |
-| geocode | `{"geocoded": 5, "failed": 0}` | 反查结果统计，PhotoEntity 的 locationName 已通过 update 写入对应行 |
-| local_gen | `{"title": "郑州3日游", "content": "...", "locationSummary": "郑州", "startDate": 1755273600000, "endDate": 1755446400000}` | 本地生成产物 |
-| vlm_gen | `{"content": "...", "success": true}` | VLM 生成产物 |
-| save | `{"note_id": 42}` | 保存结果，PhotoEntity 此时从 workflowTaskId 解绑，改为关联 travelNoteId |
-
-#### PhotoEntity 与 workflow_task 的关联（关键修正）
-
-Prepare 阶段就把 PhotoEntity 入库，关联到 workflow_task：
-
-```kotlin
-data class PhotoEntity(
-    // ... 原有字段 ...
-    val travelNoteId: Long? = null,        // 关联游记（Save 阶段后才有值）
-    val workflowTaskId: Long? = null,      // 关联工作流任务（Prepare 阶段写入，Save 阶段清空）
-)
-```
-
-**各阶段读取路径**：
-- Geocode: `photoDao.getByWorkflowTaskId(taskId)` → 拿到所有 PhotoEntity → 对有 lat/long 的逐个反查 → `photoDao.updateLocationName(photo.id, address)`
-- LocalGen: 同样从 `getByWorkflowTaskId` 读取，此时 locationName 已写入
-- VlmGen: 同上
-- Save: 创建 TravelNoteEntity 入库 → `photoDao.rebindToNote(taskId, noteId)` → 把 workflowTaskId 改为 null，travelNoteId 改为新游记 ID
-
-**为什么不在 result_json 里塞 PhotoEntity 列表**：
-- locationName 在 Geocode 阶段异步写入，若塞进 JSON 后续无法 update
-- 直接走 Room 的 update 行级更新更可靠，恢复时无需重放反查
-
-#### TravelNoteEntity 扩展
-
-```kotlin
-data class TravelNoteEntity(
-    // ... 原有字段 ...
-    val writingStyleId: Long? = null,
-    val writingStyleName: String? = null,
-    val workflowTaskId: Long? = null,  // 关联的工作流任务 ID
-)
-```
-
-### 4.2 任务恢复流程
-
-**启动时不再弹框，改为主页展示 + 用户主动恢复**：
-
-```
-APP 启动
-  ↓
-执行 markUnfinishedTasksAsPaused():
-  - 扫描 workflow_tasks 表中 status ∈ ('pending', 'running') 的记录
-  - 全部更新为 'paused'（不弹任何 UI）
-  - 保留 current_phase 字段不动
-  ↓
-进入主页
-  ↓
-检查是否存在 paused 任务
-  ├── 否 → 不显示待恢复区块
-  └── 是 → 主页顶部显示"待恢复任务"区块
-            ↓
-        用户操作:
-          ├── 点击"恢复全部" → 顺序恢复所有 paused 任务（一个完成再启动下一个）
-          ├── 点击单个任务卡片 → 直接恢复该任务（状态改 'running'，从 current_phase 续传）
-          └── 点击"管理" → 进入任务管理页（可单独恢复/暂停/放弃）
-
-任务执行中:
-  ↓
-用户点击进度页"暂停"按钮
-  ↓
-弹出确认对话框（显示当前进度）
-  ├── 用户点"取消" → 关闭对话框，任务继续执行
-  └── 用户点"确定暂停" → 任务状态改 'paused'，当前阶段到达安全停止点后中断，返回主页
-```
-
-**设计要点**：
-- **不打断用户**：启动时静默标记，不弹框
-- **主动权交给用户**：用户在主页主动选择是否恢复，避免"刚打开就弹框"的侵入感
-- **恢复无确认**：恢复是"无副作用"操作（从断点继续），不需要二次确认；只有暂停是"打断执行"才需要确认
-- **批量操作**：首页"恢复全部"一键恢复多个任务，顺序执行避免并发冲突
-- **断点续传**：恢复时读取 `current_phase` 和 `workflow_phase_results`，已完成阶段跳过
-
-### 4.3 中间数据缓存策略
-
-- **PhotoEntity**：Prepare 阶段就入库（关联 `workflowTaskId`），Geocode 阶段反查后直接 update `locationName` 行级更新。这样任务被杀后恢复时，已反查的照片不丢失 locationName。
-- **生成结果**：`local_gen` 和 `vlm_gen` 阶段的产物存入 `workflow_phase_results.result_json`
-- **缓存清理**：任务完成后保留 7 天，自动清理；任务被放弃时立即清理（PhotoEntity 一并删除，避免遗留孤儿照片记录）
-- **存储空间**：仅存储文本结果（几 KB），图片文件仍按原方式管理
-
-### 4.4 防重复执行
-
-每个阶段开始前检查 `workflow_phase_results` 表：
-
-```kotlin
-suspend fun executePhase(taskId: Long, phase: Phase): PhaseResult {
-    val existing = phaseResultDao.getByTaskAndPhase(taskId, phase.name)
-    if (existing?.status == "completed") {
-        return PhaseResult.Skip(existing.resultJson)  // 已完成，跳过
-    }
-    return doExecute(phase)
-}
-```
-
----
-
-## 5. 工作流引擎实现
-
-### 5.1 WorkflowEngine 接口
+### 4.5 引擎接口
 
 ```kotlin
 class WorkflowEngine(
     private val taskDao: WorkflowTaskDao,
     private val phaseResultDao: WorkflowPhaseResultDao,
+    private val photoDao: PhotoDao,
     private val geocoderService: GeocoderService,
     private val localGenerator: LocalContentGenerator,
     private val vlmClient: VlmClient,
+    private val vlmSettingsRepository: VlmSettingsRepository,
     private val repository: TravelRepository
 ) {
     suspend fun start(
@@ -421,7 +471,7 @@ class WorkflowEngine(
 
     suspend fun resume(taskId: Long, onProgress: (TaskProgress) -> Unit)
 
-    suspend fun cancel(taskId: Long)
+    suspend fun pause(taskId: Long)
 
     suspend fun abandon(taskId: Long)
 }
@@ -430,7 +480,10 @@ data class TaskProgress(
     val taskId: Long,
     val currentPhase: Phase,
     val phaseStatuses: Map<Phase, PhaseStatus>,
-    val overallProgress: Float,
+    val currentIndex: Int,
+    val totalPhases: Int,
+    val geocodeDone: Int,
+    val geocodeTotal: Int,
     val message: String?
 )
 
@@ -438,41 +491,45 @@ enum class Phase { PREPARE, GEOCODE, LOCAL_GEN, VLM_GEN, SAVE }
 enum class PhaseStatus { PENDING, RUNNING, COMPLETED, FAILED }
 ```
 
-### 5.2 执行逻辑（伪代码）
+### 4.6 执行逻辑（伪代码）
 
 ```kotlin
 suspend fun start(photoPaths, style, onProgress): Long {
+    // 前置校验
+    val check = canStartWorkflow()
+    require(check.canStart) { "配置未完成，无法启动" }
+
     val taskId = createTask(photoPaths, style)
     val phases = orderedPhases()
 
-    for (phase in phases) {
-        if (isCancelled(taskId)) break
+    for ((index, phase) in phases.withIndex()) {
+        if (isPaused(taskId)) break
+
+        // 防重复执行：已完成则跳过
+        val existing = phaseResultDao.getByTaskAndPhase(taskId, phase.name)
+        if (existing?.status == "completed") continue
 
         updatePhaseStatus(taskId, phase, RUNNING)
-        onProgress(buildProgress(taskId))
+        updateTaskPhaseIndex(taskId, index)
+        onProgress(buildProgress(taskId, index))
 
         try {
             val result = when (phase) {
-                PREPARE -> runPrepare(photoPaths)
-                GEOCODE -> runGeocode(taskId)
+                PREPARE  -> runPrepare(taskId, photoPaths)
+                GEOCODE  -> runGeocode(taskId)
                 LOCAL_GEN -> runLocalGen(taskId, style)
-                VLM_GEN -> runVlmGen(taskId, style)
-                SAVE -> runSave(taskId)
+                VLM_GEN  -> runVlmGen(taskId, style)
+                SAVE     -> runSave(taskId)
             }
             savePhaseResult(taskId, phase, result)
             updatePhaseStatus(taskId, phase, COMPLETED)
         } catch (e: Exception) {
-            // VLM 阶段失败可降级
-            if (phase == VLM_GEN) {
-                savePhaseResult(taskId, phase, localFallbackResult)
-                updatePhaseStatus(taskId, phase, COMPLETED)
-            } else {
-                updatePhaseStatus(taskId, phase, FAILED)
-                updateTaskStatus(taskId, "failed")
-                throw e
-            }
+            // 不降级：任何阶段失败都标记 FAILED，等待用户决策
+            updatePhaseStatus(taskId, phase, FAILED, e.message)
+            updateTaskStatus(taskId, "failed", e.message)
+            throw e
         }
-        onProgress(buildProgress(taskId))
+        onProgress(buildProgress(taskId, index))
     }
 
     updateTaskStatus(taskId, "completed")
@@ -480,7 +537,9 @@ suspend fun start(photoPaths, style, onProgress): Long {
 }
 ```
 
-### 5.3 Prepare 阶段实现
+### 4.7 各阶段实现
+
+#### Prepare 阶段
 
 ```kotlin
 private suspend fun runPrepare(taskId: Long, photoPaths: List<String>): PrepareResult {
@@ -500,11 +559,13 @@ private suspend fun runPrepare(taskId: Long, photoPaths: List<String>): PrepareR
     }
     val ids = photoDao.insertAll(photos)
     val hasGps = photos.count { it.latitude != null && it.longitude != null }
+    // 同步更新 geocode_total_count
+    taskDao.updateGeocodeTotal(taskId, hasGps)
     return PrepareResult(photoIds = ids, hasGps = hasGps)
 }
 ```
 
-### 5.4 Geocode 阶段并行优化
+#### Geocode 阶段（并行 + 节流）
 
 反查是 IO 密集操作，采用并发 + 节流：
 
@@ -522,6 +583,8 @@ private suspend fun runGeocode(taskId: Long) {
             val result = geocoderService.reverse(photo.latitude!!, photo.longitude!!)
             result.onSuccess { address ->
                 photoDao.updateLocationName(photo.id, address.formatted)
+                // 同步更新 geocode_done_count
+                taskDao.incrementGeocodeDone(taskId)
             }
         }
     }.awaitAll()
@@ -534,7 +597,7 @@ private suspend fun runGeocode(taskId: Long) {
 **并发度**：3 个协程并行（兼顾速度与 Geocoder 限流）
 **Nominatim 特判**：若回退到 Nominatim，强制串行（1.1s 间隔）
 
-### 5.5 VLM 执行逻辑（不降级）
+#### VLM 阶段（不降级）
 
 ```kotlin
 private suspend fun runVlmGen(taskId: Long, style: WritingStyle) {
@@ -561,7 +624,7 @@ private suspend fun runVlmGen(taskId: Long, style: WritingStyle) {
 }
 ```
 
-### 5.6 Save 阶段实现
+#### Save 阶段
 
 ```kotlin
 private suspend fun runSave(taskId: Long): Long {
@@ -603,107 +666,44 @@ SET travelNoteId = :noteId, workflowTaskId = NULL
 WHERE workflowTaskId = :taskId
 ```
 
+### 4.8 取消、暂停与重试
+
+- **放弃（abandon）**：调用 `abandon()` 后，任务标记为 `failed`，清理中间数据。与暂停不同，放弃后任务不可恢复。
+- **暂停（pause）**：调用 `pause()` 后，当前阶段完成当前可中断点后停止（不强制中断网络请求）。已完成阶段的中间结果保留，任务状态改为 `paused`。暂停后可通过主页恢复继续执行。
+- **重试**：失败阶段可单独重试，无需从头开始。其他已完成阶段跳过（由 4.6 节防重复执行逻辑保障）。
+- **不降级**：VLM 阶段失败不自动降级到本地生成结果，任务标记为 FAILED 等待用户决策（重试或放弃）。
+
+### 4.9 任务恢复流程
+
+```
+APP 启动
+  ↓
+执行 markUnfinishedTasksAsPaused():
+  - 扫描 workflow_tasks 表中 status ∈ ('pending', 'running') 的记录
+  - 全部更新为 'paused'（不弹任何 UI）
+  - 保留 current_phase 字段不动
+  ↓
+进入主页
+  ↓
+检查是否存在 paused 任务
+  ├── 否 → 不显示待恢复区块
+  └── 是 → 主页顶部显示"待恢复任务"区块
+            ↓
+        用户操作:
+          ├── 点击"恢复全部" → 顺序恢复所有 paused 任务（一个完成再启动下一个）
+          ├── 点击单个任务卡片 → 直接恢复该任务（状态改 'running'，从 current_phase 续传）
+          └── 点击"管理" → 进入任务管理页（可单独恢复/暂停/放弃）
+```
+
+**断点续传**：恢复时读取 `current_phase` 和 `workflow_phase_results`，已完成阶段跳过（由 4.6 节防重复执行逻辑保障）。
+
 ---
 
-## 6. UI 变更详情
-
-### 6.1 创建游记页（精简后）
-
-```
-Column {
-    // 照片选择区
-    Card {
-        Row { [拍照] [图库] }
-        if (photos.isNotEmpty()) {
-            photos.chunked(3).forEach { row -> Row { ... } }
-        }
-    }
-
-    // 风格选择区
-    Card {
-        Text("选择风格")
-        FlowRow {
-            builtinStyles.forEach { style -> FilterChip(style.name) }
-            AssistChip("+ 管理")
-        }
-    }
-
-    // 操作按钮
-    Row {
-        Button("保存草稿")  ← 仅持久化，不触发后台
-        Button("开始生成")  ← 启动工作流，仅 pending 状态可用
-    }
-}
-```
-
-**移除的组件**：
-- 标题输入框（`OutlinedTextField` for title）
-- 日期范围选择卡
-- 正文输入框（`OutlinedTextField` for content）
-- 智能生成 / VLM 生成按钮
-- 生成进度条（移到独立进度页）
-- VLM 提示 Chip
-
-**保留的组件**：
-- 照片选择区（拍照 + 图库 + 3列网格）
-- 风格选择行
-- 「保存草稿」+「开始生成」按钮组
-
-### 6.2 工作流进度页（新页面）
-
-- 全屏对话框（不可关闭），顶部显示阶段列表
-- 每个阶段显示 `(N/M)` 序号 + 阶段名 + 状态图标，不显示百分比进度条
-- Geocode 阶段附加显示反查细粒度：`(2/5) 解析中 (3/8 张)`
-- 底部按钮区：
-  - RUNNING 状态：显示「暂停」按钮（点击触发 `PauseConfirmDialog`）
-  - PAUSED 状态：显示「恢复」按钮（直接续传，无需二次确认）
-  - COMPLETED 状态：显示「完成」按钮（跳转详情页）
-  - FAILED 状态：显示「重试」/「放弃」按钮
-- 任务完成后自动关闭，跳转到游记详情页
-
-### 6.3 游记详情页（扩展）
-
-详情页在原有展示功能基础上，根据关联的 `workflowTaskId` 状态显示对应操作区：
-
-```
-游记详情页
-├── 内容展示区（标题/正文/照片/日期等，原有功能）
-└── 工作流状态区（仅在 travelNote.workflowTaskId != null 时显示）
-    ├── 状态徽标（草稿 / 运行中 / 已暂停 / 已完成 / 失败）
-    ├── 阶段进度文本（"(3/5) 整理行程内容" 形式，无百分比）
-    └── 操作按钮（按状态切换）
-        ├── PENDING（草稿）：[开始生成]  [编辑照片]
-        ├── RUNNING：[暂停]
-        ├── PAUSED：[恢复]  [放弃]  [编辑照片]
-        ├── COMPLETED：[增量更新]  [编辑照片]
-        └── FAILED：[重试]  [放弃]
-```
-
-**按钮行为**：
-- **开始生成** → 校验配置后启动工作流，进入进度页
-- **暂停** → 触发 `PauseConfirmDialog`，确认后任务改 `paused`
-- **恢复** → 任务改 `running`，从 `current_phase` 续传，UI 切换到进度反馈模式
-- **重试** → 失败阶段重新执行，其他已完成阶段跳过
-- **放弃** → 任务标记 `failed`，清理中间数据，游记本体保留（若 Save 阶段已部分完成）
-- **编辑照片** → 进入照片编辑模式（增删照片），保存后根据当前任务状态触发对应编辑流程（详见 6.5 节）
-- **增量更新** → 任务完成后用户编辑了照片或正文，点击此按钮触发增量生成（详见 6.5 节）
-
-**设计要点**：
-- 进度页和详情页共用同一套工作流状态 ViewModel，避免逻辑重复
-- 详情页的"恢复"与首页"待恢复"区块的"恢复"完全一致，调用同一个 `WorkflowEngine.resume()`
-- 任务 RUNNING 时详情页只读，不允许编辑正文（避免与 AI 生成结果冲突）
-- 任务 PENDING/PAUSED/COMPLETED 后允许用户编辑正文和照片
-- 任务 PENDING 状态等同于"草稿"，此时「保存草稿」无意义（已入库），主操作变为「开始生成」
-
-### 6.4 任务恢复区块（首页）
-
-详见 2.3 节，主页顶部展示 paused 任务列表，支持「恢复全部」、单个卡片直接恢复、「管理」入口。恢复按钮无二次确认（无副作用操作），暂停才需要二次确认。
-
-### 6.5 编辑场景处理（核心）
+## 5. 编辑场景处理
 
 用户编辑照片的时机分三种，处理策略各异。**核心目标**：GEOCODE 只处理新增图片，VLM 只处理增量 diff，最大化复用已有结果以省钱省时。
 
-#### 场景一：执行前编辑（任务状态 `pending`）
+### 5.1 场景一：执行前编辑（任务状态 `pending`）
 
 **特点**：工作流尚未启动，所有阶段结果为空，编辑完全无副作用。
 
@@ -718,10 +718,10 @@ Column {
 用户点击「开始生成」→ 正常启动工作流，从 Prepare 阶段开始
 ```
 
-**GEOCODE 优化**：无（任务未启动，无已反查数据可复用）
-**VLM 优化**：无（任务未启动，无生成结果可复用）
+- **GEOCODE 优化**：无（任务未启动，无已反查数据可复用）
+- **VLM 优化**：无（任务未启动，无生成结果可复用）
 
-#### 场景二：执行中编辑（任务状态 `running` / `paused`）
+### 5.2 场景二：执行中编辑（任务状态 `running` / `paused`）
 
 **特点**：工作流正在执行或被暂停，已有部分阶段结果。用户编辑照片后，正在执行的阶段结果可能失效。
 
@@ -757,7 +757,7 @@ Column {
 - **LocalGen/VlmGen 不可复用**：照片集合变化后，已生成的内容已失效，必须重新执行。但 LocalGen 是本地的，代价低；VlmGen 重新调一次 API 是必要代价。
 - **阶段结果清理**：编辑后把 `local_gen` 和 `vlm_gen` 的 phase_result 删除（标记为 `pending`），恢复执行时从 Geocode 阶段后继续，跳过已完成的 Geocode。
 
-#### 场景三：执行后编辑（任务状态 `completed`）
+### 5.3 场景三：执行后编辑（任务状态 `completed`）
 
 **特点**：游记已生成并入库，用户对照片或正文做了修改，需要增量更新内容。
 
@@ -769,34 +769,27 @@ Column {
   ↓
 系统计算 diff: added[] / removed[] / unchanged[]
   ↓
+任务状态保持 COMPLETED，但标记 has_pending_edit = true
+  ↓
 用户点击「增量更新」 → 根据 diff 选择更新策略:
-  ├── 仅 added（新增照片）→ 增量补充模式（省钱）
-  ├── 仅 removed（删除照片）→ 删除标记模式
-  └── 混合（既有新增又有删除）→ 增量补充 + 删除标记
+  ├── 仅 added（新增照片）→ 策略 A 增量补充模式（省钱）
+  ├── 仅 removed（删除照片）→ 策略 B 删除标记模式
+  └── 混合（既有新增又有删除）→ 策略 C 增量补充 + 删除标记
 ```
 
-**策略 A：仅 added（新增照片）—— 最省钱**
+#### 策略 A：仅 added（新增照片）—— 最省钱
 
 ```
 1. 对 added[] 执行 Geocode（unchanged[] 跳过）
 2. 读取原 vlm_gen 的 result_json（即原游记正文）
-3. 构建 VLM 增量 prompt:
-   "以下是已有游记内容：
-    {原正文}
-
-    现新增了 N 张照片：
-    照片1：拍摄时间 X、地点 Y、画面描述[可选]
-    照片2：...
-
-    请在保持原文风格和结构的基础上，将新增照片自然融入游记，
-    可以在合适位置插入新段落，不要重写已有内容。"
+3. 构建 VLM 增量 prompt（见 5.4 节策略 A 模板）
 4. 调 VLM 一次 → 拿到增量更新后的正文
 5. 更新游记 content，PhotoEntity 关联到游记
 ```
 
 **Token 估算**：仅 added[] 图片的 Vision tokens + 原文作为上下文（~1000 tokens 文本），远低于全量重新生成。
 
-**策略 B：仅 removed（删除照片）—— 不调 VLM**
+#### 策略 B：仅 removed（删除照片）—— 不调 VLM
 
 ```
 1. 从原游记正文中识别被删照片对应的段落
@@ -809,7 +802,7 @@ Column {
 
 **推荐方案1**：VLM 生成时输出带 `[PHOTO:id]` 标记的正文，删除照片时本地正则替换，完全不调 VLM。
 
-**策略 C：混合（既有新增又有删除）**
+#### 策略 C：混合（既有新增又有删除）
 
 ```
 1. 对 added[] 执行 Geocode
@@ -820,25 +813,9 @@ Column {
 
 **Token 估算**：仅 added[] 图片 Vision tokens + 原文 + 删除指令，仍远低于全量重新生成。
 
-#### 6.5.1 数据模型支持
+### 5.4 VLM Prompt 模板（增量更新）
 
-`workflow_phase_results` 表新增字段以支持增量：
-
-```sql
-ALTER TABLE workflow_phase_results ADD COLUMN phase_version INTEGER NOT NULL DEFAULT 1;
--- 每次编辑后递增，用于追踪结果版本
-```
-
-`workflow_tasks` 表新增字段：
-
-```sql
-ALTER TABLE workflow_tasks ADD COLUMN last_diff_json TEXT;
--- 记录上次编辑的 diff（added/removed id 列表），供 VLM prompt 使用
-```
-
-#### 6.5.2 VLM Prompt 模板（增量更新）
-
-**新增照片（策略 A）**：
+**策略 A（新增照片）**：
 ```
 你是游记写作助手。以下是已有游记：
 
@@ -856,7 +833,7 @@ ALTER TABLE workflow_tasks ADD COLUMN last_diff_json TEXT;
 保留原文中的 [PHOTO:id] 标记，新增照片用 [PHOTO:new_id] 标记。
 ```
 
-**删除照片（策略 B，方案1，无 VLM）**：
+**策略 B（删除照片，方案1，无 VLM）**：
 ```kotlin
 fun removePhotoFromContent(content: String, photoId: Long): String {
     // 删除 [PHOTO:photoId] 标记及其所在段落
@@ -865,7 +842,7 @@ fun removePhotoFromContent(content: String, photoId: Long): String {
 }
 ```
 
-#### 6.5.3 编辑场景的成本对比
+### 5.5 编辑场景成本对比
 
 | 场景 | Geocode 调用 | VLM 调用 | Token 量 |
 |------|------------|---------|---------|
@@ -874,7 +851,7 @@ fun removePhotoFromContent(content: String, photoId: Long): String {
 | 仅删除 K 张 | 0 次 | 0 次（方案1） | 0 |
 | 混合（新增 K1 + 删除 K2） | K1 次 | 1 次 | K1 张图片 Vision + 原文 + 删除指令 |
 
-#### 6.5.4 编辑流程状态机
+### 5.6 编辑流程状态机
 
 ```
 任务状态: COMPLETED
@@ -895,7 +872,7 @@ fun removePhotoFromContent(content: String, photoId: Long): String {
 任务状态改 COMPLETED，has_pending_edit = false
 ```
 
-#### 6.5.5 边界情况
+### 5.7 边界情况
 
 - **编辑后未点增量更新就退出**：游记保留原内容，PhotoEntity 已更新，下次进入详情页仍显示「增量更新」按钮（has_pending_edit 标记）
 - **增量更新过程中再次编辑**：禁止。RUNNING 状态下「编辑照片」按钮禁用，必须等增量更新完成或暂停
@@ -904,117 +881,20 @@ fun removePhotoFromContent(content: String, photoId: Long): String {
 
 ---
 
-## 7. 数据模型变更汇总
-
-### 7.1 新增表
-
-**workflow_tasks**：
-```sql
-CREATE TABLE workflow_tasks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  status TEXT NOT NULL DEFAULT 'pending',
-  current_phase TEXT NOT NULL DEFAULT 'prepare',
-  current_phase_index INTEGER NOT NULL DEFAULT 0,  -- 当前阶段序号（0-based），用于 (N/M) 展示
-  total_phases INTEGER NOT NULL DEFAULT 5,          -- 总阶段数，默认 5
-  geocode_done_count INTEGER NOT NULL DEFAULT 0,    -- Geocode 阶段已反查数（额外细粒度）
-  geocode_total_count INTEGER NOT NULL DEFAULT 0,  -- Geocode 阶段总照片数
-  selected_style_id INTEGER,
-  selected_style_name TEXT,
-  input_photo_paths TEXT NOT NULL,
-  created_note_id INTEGER,
-  error_message TEXT,
-  has_pending_edit INTEGER NOT NULL DEFAULT 0,    -- 是否有未应用的编辑（0/1）
-  last_diff_json TEXT,                            -- 上次编辑 diff（added/removed id 列表）
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-)
-```
-
-**workflow_phase_results**：
-```sql
-CREATE TABLE workflow_phase_results (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id INTEGER NOT NULL,
-  phase TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  result_json TEXT,
-  error_message TEXT,
-  phase_version INTEGER NOT NULL DEFAULT 1,  -- 每次编辑后递增，追踪结果版本
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  UNIQUE(task_id, phase)
-)
-```
-
-**writing_styles**（V2 设计，保留）：
-```sql
-CREATE TABLE writing_styles (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  prompt_guideline TEXT NOT NULL,
-  opening_tone TEXT,
-  closing_tone TEXT,
-  is_builtin INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
-)
-```
-
-### 7.2 扩展表
-
-**TravelNoteEntity** 新增字段：
-```kotlin
-val writingStyleId: Long? = null,
-val writingStyleName: String? = null,
-val workflowTaskId: Long? = null,
-```
-
-**PhotoEntity** 扩展字段：
-```kotlin
-// 已有字段：latitude / longitude / locationName（V3 真正写入）
-// 新增字段：workflowTaskId（Prepare 阶段写入，Save 阶段清空）
-val workflowTaskId: Long? = null,
-```
-
-Room migration：新增 `workflow_task_id` 列允许 null，老数据兼容（老数据的照片都已关联游记，workflowTaskId 始终为 null）。
-
-新增 DAO 方法：
-```kotlin
-@Query("SELECT * FROM photos WHERE workflowTaskId = :taskId")
-suspend fun getByWorkflowTaskId(taskId: Long): List<PhotoEntity>
-
-@Query("UPDATE photos SET locationName = :name WHERE id = :photoId")
-suspend fun updateLocationName(photoId: Long, name: String)
-
-@Query("UPDATE photos SET travelNoteId = :noteId, workflowTaskId = NULL WHERE workflowTaskId = :taskId")
-suspend fun rebindToNote(taskId: Long, noteId: Long)
-
-@Insert
-suspend fun insertAll(photos: List<PhotoEntity>): List<Long>
-```
-
-### 7.3 SharedPreferences
-
-**GeocodingSettings**（V2 设计，保留）：
-```kotlin
-data class GeocodingSettings(
-    val amapKey: String = ""
-)
-```
-
----
-
-## 8. 架构总览
+## 6. 架构总览
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                      UI Layer                           │
-│  CreateTravelScreen │ WorkflowProgressScreen │ RecoveryDialog │
+│  CreateTravelScreen │ WorkflowProgressScreen │ DetailScreen │
+│  HomeScreen（待恢复区块） │ SetupWizardScreen         │
 └──────────┬──────────────────┬───────────────────────────┘
-           │ save()            │ start()/resume()
+           │ saveDraft()       │ start()/resume()
            ▼                  ▼
 ┌─────────────────────────────────────────────────────────┐
 │                 ViewModel Layer                         │
 │  CreateTravelViewModel    WorkflowViewModel              │
+│  DetailViewModel          SettingsViewModel              │
 └──────────┬──────────────────┬───────────────────────────┘
            │                  │
            ▼                  ▼
@@ -1035,38 +915,39 @@ data class GeocodingSettings(
 ┌─────────────────────────────────────────────────────────┐
 │                  Data Layer                             │
 │  TravelRepository │ WorkflowTaskDao │ PhaseResultDao    │
-│  GeocoderService │ VlmClient │ LocalContentGenerator    │
+│  PhotoDao │ GeocoderService │ VlmClient                 │
+│  LocalContentGenerator │ WritingStyleDao               │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 9. 实现计划
+## 7. 实现计划
 
 ### 阶段 A：数据层 + 工作流引擎（核心）
 
 1. Room 数据库升级：新增 `workflow_tasks`、`workflow_phase_results`、`writing_styles` 三张表
 2. `TravelNoteEntity` 迁移：新增 `writingStyleId`、`writingStyleName`、`workflowTaskId` 三列
-3. DAO：`WorkflowTaskDao`、`WorkflowPhaseResultDao`、`WritingStyleDao`
-4. `GeocoderService` 实现：`SystemGeocoderService` + `NominatimGeocoderService` + `CompositeGeocoderService`
-5. `WorkflowEngine` 核心逻辑：5 个阶段的执行、持久化、恢复、取消
-6. `canStartWorkflow()` 前置校验：VLM 已配置 + 地理编码可用，缺一项拒绝启动
+3. `PhotoEntity` 迁移：新增 `workflowTaskId` 列，新增 `getByWorkflowTaskId` / `updateLocationName` / `rebindToNote` / `insertAll` DAO 方法
+4. DAO：`WorkflowTaskDao`、`WorkflowPhaseResultDao`、`WritingStyleDao`
+5. `GeocoderService` 实现：`SystemGeocoderService` + `NominatimGeocoderService` + `CompositeGeocoderService`
+6. `WorkflowEngine` 核心逻辑：5 个阶段的执行、持久化、恢复、暂停、放弃
+7. `canStartWorkflow()` 前置校验：VLM 已配置 + 地理编码可用，缺一项拒绝启动
 
 ### 阶段 B：页面精简
 
-1. `CreateTravelScreen`：移除标题/日期/正文/生成按钮，新增风格选择行
-2. `CreateTravelViewModel`：简化 `save()` 为 `startWorkflow()`，不再直接保存
-3. `SaveAndGenerate` 按钮替代原 Save 按钮
+1. `CreateTravelScreen`：移除标题/日期/正文/生成按钮，新增风格选择行，改为「保存草稿」+「开始生成」双按钮
+2. `CreateTravelViewModel`：拆分 `saveDraft()`（仅持久化）和 `startWorkflow()`（启动引擎）
+3. 「开始生成」按钮根据任务状态禁用
 
 ### 阶段 C：进度页 + 恢复机制 + 首次配置引导
 
-1. `WorkflowProgressScreen`：全屏进度对话框，含「暂停」按钮
+1. `WorkflowProgressScreen`：全屏进度对话框，含「暂停」按钮和 `PauseConfirmDialog`
 2. `markUnfinishedTasksAsPaused()`：Application 启动时静默将 pending/running 任务标记为 paused
 3. 首页"待恢复任务"区块：展示 paused 任务列表 + "恢复全部"按钮 + "管理"入口
-4. `PauseConfirmDialog`：用户点击进度页暂停按钮时弹出，显示当前进度并要求二次确认
-5. `WorkflowViewModel`：管理进度状态和 UI 交互（含暂停/恢复动作）
-6. `SetupWizardScreen`：首次启动配置引导页，强制完成 VLM + 地理编码配置
-7. 启动路由：`setup_completed=false` → 强制进入引导页；否则进入主页
+4. `WorkflowViewModel`：管理进度状态和 UI 交互（含暂停/恢复动作）
+5. `SetupWizardScreen`：首次启动配置引导页，强制完成 VLM + 地理编码配置
+6. 启动路由：`setup_completed=false` → 强制进入引导页；否则进入主页
 
 ### 阶段 D：风格系统
 
@@ -1094,9 +975,9 @@ data class GeocodingSettings(
 
 ---
 
-## 10. 风险与开放问题
+## 8. 风险与开放问题
 
-### 10.1 APP 被杀后的恢复边界
+### 8.1 APP 被杀后的恢复边界
 
 | 场景 | 恢复行为 |
 |------|---------|
@@ -1108,33 +989,36 @@ data class GeocodingSettings(
 
 **注意**：所有阶段被杀后都不会自动恢复，统一标记为 paused 等待用户在主页主动决策。
 
-### 10.2 内存与线程
+### 8.2 内存与线程
 
 - WorkflowEngine 使用单线程协程调度（`Executors.newSingleThreadExecutor().asCoroutineDispatcher()`），避免并发写入冲突
 - Geocode 阶段使用独立的 IO 调度器，并发度限制为 3
 - 整个工作流在 ViewModel 的 `viewModelScope` 中启动，配置变更（如屏幕旋转）不会中断
 
-### 10.3 用户体验
+### 8.3 用户体验
 
-- "保存并生成"点击后立即进入进度页，用户无法返回（避免误操作）
+- 「开始生成」点击后立即进入进度页，用户无法返回（避免误操作）
 - 生成完成后自动跳转到游记详情页，展示最终结果
 - 生成失败时在进度页显示错误原因，允许用户重试或放弃
 - 放弃任务后回到创建游记页，已选照片保留
 
-### 10.4 存储空间
+### 8.4 存储空间
 
 - 工作流任务表和阶段结果表仅存储文本数据，单任务 < 5KB
 - 定期清理：已完成 > 7 天、已放弃 > 3 天的任务自动清理
 - 图片文件仍按原方式管理（应用内部存储），不随任务表清理
 
-### 10.5 Geocoder 兼容性（延续 V2 分析）
+### 8.5 Geocoder 兼容性
 
-- 国内大部分手机可用，但不稳定
-- 回退链路：Geocoder(系统) → Nominatim(免 key) → 仅坐标
-- 已知可用：小米 MIUI、华为 EMUI、OPPO ColorOS、vivo OriginOS
+- Android 原生 `android.location.Geocoder` **不是本地功能，必须联网**：底层始终走网络请求，依赖 Google Maps Geocoding API（国内手机被厂商替换成腾讯/高德/百度等国内服务）
+- 没有网络时，Geocoder 直接返回空列表或抛 `IOException`
+- 国内大部分手机可用，但不稳定（部分机型可能返回空）
+- **不支持批量查询**：`getFromLocation(lat, lng, maxResults)` 只接受一对经纬度，多张照片只能逐个调用
+- 已知可用：小米 MIUI（后端为腾讯地图）、华为 EMUI、OPPO ColorOS、vivo OriginOS
+- **回退链路**：`Geocoder(系统)` → 失败 → `高德(有 key 时)` → 失败 → `Nominatim(免 key)` → 失败 → 返回仅坐标
 - **强制要求**：首次启动配置引导页要求地理编码测试必须通过，若 Geocoder 不可用，用户必须配置高德 Key 或确保有网络访问 Nominatim
 
-### 10.6 VLM Token 成本
+### 8.6 VLM Token 成本
 
 - N 张照片 × detail:"low" ≈ N × 85 tokens
 - 结构化上下文 prompt ≈ 500-1000 tokens
@@ -1143,7 +1027,7 @@ data class GeocodingSettings(
 
 ---
 
-## 11. 参考资料
+## 9. 参考资料
 
 - Room 持久化：https://developer.android.com/training/data-storage/room
 - Android WorkManager（备选，如需后台任务）：https://developer.android.com/topic/libraries/architecture/workmanager
