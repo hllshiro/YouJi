@@ -86,7 +86,7 @@ V2 设计了"选照片 → 自动地理反查 → 本地生成 → VLM 润色 �
 - `running`：显示「暂停」按钮（点击触发 `PauseConfirmDialog`）
 - `paused`：显示「恢复」按钮（直接续传，无需二次确认）
 - `completed`：显示「完成」按钮（跳转详情页）
-- `failed`：显示「重试」/「放弃」按钮
+- `failed`：显示错误原因（来自 `error_message` 字段，如"用户手动停止任务"/"未获取到任何照片信息..."/"VLM 调用失败：HTTP 401" 等）+ 「重试」/「放弃」按钮
 
 任务完成后自动关闭，跳转到游记详情页。
 
@@ -105,7 +105,7 @@ V2 设计了"选照片 → 自动地理反查 → 本地生成 → VLM 润色 �
         ├── RUNNING：[暂停]
         ├── PAUSED：[恢复]  [放弃]  [编辑照片]
         ├── COMPLETED：[增量更新]  [编辑照片]
-        └── FAILED：[重试]  [放弃]
+        └── FAILED：显示错误原因（error_message）+ [重试]  [放弃]
 ```
 
 **按钮行为**：
@@ -313,15 +313,16 @@ suspend fun insertAll(photos: List<PhotoEntity>): List<Long>
 
 | 阶段 | result_json 示例 | 说明 |
 |------|-----------------|------|
-| prepare | `{"photo_ids": [1,2,3,4,5], "has_gps": 3}` | PhotoEntity 已入库，记录 id 列表和有 GPS 的张数；后续阶段通过 `photoDao.getByWorkflowTaskId(taskId)` 查询 |
-| geocode | `{"geocoded": 5, "failed": 0}` | 反查结果统计，PhotoEntity 的 locationName 已通过 update 写入对应行 |
+| prepare | `{"photo_ids": [1,2,3,4,5], "has_gps": 3, "photos": [{"id":1,"path":"...","taken_at":1755273600000,"lat":34.75,"lng":113.62,"make":"Xiaomi","model":"14Pro"}, ...]}` | PhotoEntity 已入库；result_json 同时记录每张照片的元数据快照（id/path/taken_at/lat/lng/make/model），即使 PhotoEntity 表被清理仍可从快照恢复上下文 |
+| geocode | `{"geocoded": 5, "failed": 0, "results": [{"photo_id":1,"lat":34.75,"lng":113.62,"address":"河南省郑州市中原区...","success":true}, {"photo_id":2,"lat":null,"lng":null,"address":null,"success":false,"reason":"无GPS"}]}` | 每张照片的反查结果快照（photo_id/坐标/地址/成功标志/失败原因），与 PhotoEntity.locationName 行级更新并行写入 |
 | local_gen | `{"title": "郑州3日游", "content": "...", "locationSummary": "郑州", "startDate": 1755273600000, "endDate": 1755446400000}` | 本地生成产物 |
 | vlm_gen | `{"content": "...", "success": true}` | VLM 生成产物 |
 | save | `{"note_id": 42}` | 保存结果，PhotoEntity 此时从 workflowTaskId 解绑，改为关联 travelNoteId |
 
-**为什么不在 result_json 里塞 PhotoEntity 列表**：
-- locationName 在 Geocode 阶段异步写入，若塞进 JSON 后续无法 update
-- 直接走 Room 的 update 行级更新更可靠，恢复时无需重放反查
+**为什么 result_json 要存详细快照**：
+- Prepare 和 Geocode 阶段的详细结果（每张照片的元数据、反查地址）必须持久化入库，不只存统计数字
+- 即使 PhotoEntity 表被清理，phase_result 仍保留完整快照供 VLM 增量更新和审计使用
+- locationName 仍通过 Room 的 update 行级更新写入 PhotoEntity（保证 Geocode 阶段异步写入的可靠性），result_json 中的 results 数组作为冗余快照
 
 ### 3.4 PhotoEntity 与 workflow_task 的关联
 
@@ -344,6 +345,8 @@ data class PhotoEntity(
 ### 3.5 中间数据缓存策略
 
 - **PhotoEntity**：Prepare 阶段就入库（关联 `workflowTaskId`），Geocode 阶段反查后直接 update `locationName` 行级更新。任务被杀后恢复时，已反查的照片不丢失 locationName。
+- **Prepare 详细结果入库**：`prepare` 阶段的 `result_json` 必须包含每张照片的元数据快照（id/path/taken_at/lat/lng/make/model），不只存统计数字
+- **Geocode 详细结果入库**：`geocode` 阶段的 `result_json` 必须包含每张照片的反查结果快照（photo_id/坐标/地址/成功标志/失败原因），与 PhotoEntity.locationName 行级更新并行写入
 - **生成结果**：`local_gen` 和 `vlm_gen` 阶段的产物存入 `workflow_phase_results.result_json`
 - **缓存清理**：任务完成后保留 7 天自动清理；任务被放弃时立即清理（PhotoEntity 一并删除，避免遗留孤儿照片记录）
 - **存储空间**：仅存储文本结果（几 KB），图片文件仍按原方式管理
@@ -372,7 +375,8 @@ suspend fun executePhase(taskId: Long, phase: Phase): PhaseResult {
 阶段 1: 准备（Prepare）
   - 扫描照片 EXIF，提取 lat/long/takenAt
   - 创建 PhotoEntity 入库，关联 workflowTaskId（不关联 travelNoteId）
-  - result_json 记录 photo_ids 列表，供后续阶段定位
+  - result_json 记录 photo_ids 列表 + 每张照片的元数据快照，供后续阶段定位
+  - 失败条件：所有照片均未获取到任何有效 EXIF 信息（无 taken_at、无 lat/lng）时，标记任务 FAILED 并停止工作流
   ↓
 阶段 2: 地理反查（Geocode）
   - 从 photoDao.getByWorkflowTaskId(taskId) 读取 PhotoEntity
@@ -473,7 +477,7 @@ class WorkflowEngine(
 
     suspend fun pause(taskId: Long)
 
-    suspend fun abandon(taskId: Long)
+    suspend fun abandon(taskId: Long)  // 内部固定写入 error_message = "用户手动停止任务"
 }
 
 data class TaskProgress(
@@ -524,9 +528,10 @@ suspend fun start(photoPaths, style, onProgress): Long {
             savePhaseResult(taskId, phase, result)
             updatePhaseStatus(taskId, phase, COMPLETED)
         } catch (e: Exception) {
-            // 不降级：任何阶段失败都标记 FAILED，等待用户决策
-            updatePhaseStatus(taskId, phase, FAILED, e.message)
-            updateTaskStatus(taskId, "failed", e.message)
+            // 不降级：任何阶段失败都标记 FAILED，写入失败信息，等待用户决策
+            val errorMsg = e.message ?: "未知错误"
+            updatePhaseStatus(taskId, phase, FAILED, errorMsg)
+            updateTaskStatus(taskId, "failed", errorMsg)
             throw e
         }
         onProgress(buildProgress(taskId, index))
@@ -561,22 +566,48 @@ private suspend fun runPrepare(taskId: Long, photoPaths: List<String>): PrepareR
     val hasGps = photos.count { it.latitude != null && it.longitude != null }
     // 同步更新 geocode_total_count
     taskDao.updateGeocodeTotal(taskId, hasGps)
-    return PrepareResult(photoIds = ids, hasGps = hasGps)
+
+    // 失败条件：所有照片均未获取到任何有效 EXIF 信息（无 taken_at 且无 lat/lng）
+    val hasAnyValidInfo = photos.any { it.takenAt != null || (it.latitude != null && it.longitude != null) }
+    if (!hasAnyValidInfo) {
+        throw WorkflowException("未获取到任何照片信息（无拍摄时间、无 GPS 数据），无法继续生成游记")
+    }
+
+    // 构建详细快照 result_json
+    val snapshot = PhotoSnapshot(
+        photoIds = ids,
+        hasGps = hasGps,
+        photos = photos.mapIndexed { index, photo ->
+            PhotoMetaSnapshot(
+                id = ids[index],
+                path = photo.filePath,
+                takenAt = photo.takenAt,
+                lat = photo.latitude,
+                lng = photo.longitude,
+                make = photo.exifMake,
+                model = photo.exifModel
+            )
+        }
+    )
+    return PrepareResult(snapshot)
 }
 ```
 
-#### Geocode 阶段（并行 + 节流）
+**失败处理**：抛出 `WorkflowException` 后由 4.6 节执行逻辑的 catch 块统一捕获，写入 `error_message` 并标记任务 FAILED，工作流停止。
 
-反查是 IO 密集操作，采用并发 + 节流：
+#### Geocode 阶段（并行 + 节流 + 详细快照）
+
+反查是 IO 密集操作，采用并发 + 节流，反查结果同时写入 PhotoEntity 和 result_json 快照：
 
 ```kotlin
-private suspend fun runGeocode(taskId: Long) {
+private suspend fun runGeocode(taskId: Long): GeocodeResult {
     val photos = photoDao.getByWorkflowTaskId(taskId)
     val needGeocode = photos.filter { it.latitude != null && it.longitude != null }
 
     // 部分恢复场景：跳过已反查的
     val pending = needGeocode.filter { it.locationName == null }
 
+    val results = mutableListOf<GeocodeItemResult>()
     val scope = CoroutineScope(Dispatchers.IO)
     pending.map { photo ->
         scope.async {
@@ -585,12 +616,34 @@ private suspend fun runGeocode(taskId: Long) {
                 photoDao.updateLocationName(photo.id, address.formatted)
                 // 同步更新 geocode_done_count
                 taskDao.incrementGeocodeDone(taskId)
+                results.add(GeocodeItemResult(
+                    photoId = photo.id, lat = photo.latitude, lng = photo.longitude,
+                    address = address.formatted, success = true
+                ))
+            }.onFailure { e ->
+                results.add(GeocodeItemResult(
+                    photoId = photo.id, lat = photo.latitude, lng = photo.longitude,
+                    address = null, success = false, reason = e.message
+                ))
             }
         }
     }.awaitAll()
 
+    // 无 GPS 的照片也记录到快照
+    photos.filter { it.latitude == null || it.longitude == null }.forEach {
+        results.add(GeocodeItemResult(
+            photoId = it.id, lat = null, lng = null,
+            address = null, success = false, reason = "无GPS数据"
+        ))
+    }
+
     val completed = photoDao.getByWorkflowTaskId(taskId)
     emitProgress(geocodedCount = completed.count { it.locationName != null })
+    return GeocodeResult(
+        geocoded = results.count { it.success },
+        failed = results.count { !it.success },
+        results = results
+    )
 }
 ```
 
@@ -616,10 +669,11 @@ private suspend fun runVlmGen(taskId: Long, style: WritingStyle) {
         val merged = localResult.copy(content = content)
         savePhaseResult(taskId, VLM_GEN, merged.toJson())
     }.onFailure { e ->
-        // 失败时标记任务为 FAILED，等待用户重试或放弃
-        updatePhaseStatus(taskId, VLM_GEN, FAILED, e.message)
-        updateTaskStatus(taskId, "failed", e.message)
-        throw e
+        // 失败时标记任务为 FAILED，写入失败信息，等待用户重试或放弃
+        val errorMsg = "VLM 调用失败：${e.message ?: e.javaClass.simpleName}"
+        updatePhaseStatus(taskId, VLM_GEN, FAILED, errorMsg)
+        updateTaskStatus(taskId, "failed", errorMsg)
+        throw WorkflowException(errorMsg)
     }
 }
 ```
@@ -668,10 +722,14 @@ WHERE workflowTaskId = :taskId
 
 ### 4.8 取消、暂停与重试
 
-- **放弃（abandon）**：调用 `abandon()` 后，任务标记为 `failed`，清理中间数据。与暂停不同，放弃后任务不可恢复。
-- **暂停（pause）**：调用 `pause()` 后，当前阶段完成当前可中断点后停止（不强制中断网络请求）。已完成阶段的中间结果保留，任务状态改为 `paused`。暂停后可通过主页恢复继续执行。
+- **放弃（abandon）**：调用 `abandon()` 后，任务标记为 `failed`，`error_message` 字段写入固定文案 `"用户手动停止任务"`，清理中间数据。与暂停不同，放弃后任务不可恢复。任何阶段被用户放弃后，UI 都应显示该失败信息。
+- **暂停（pause）**：调用 `pause()` 后，当前阶段完成当前可中断点后停止（不强制中断网络请求）。已完成阶段的中间结果保留，任务状态改为 `paused`。暂停后可通过主页恢复继续执行。暂停不是失败，不写 `error_message`。
 - **重试**：失败阶段可单独重试，无需从头开始。其他已完成阶段跳过（由 4.6 节防重复执行逻辑保障）。
-- **不降级**：VLM 阶段失败不自动降级到本地生成结果，任务标记为 FAILED 等待用户决策（重试或放弃）。
+- **失败信息显示**：任何阶段失败（含用户手动放弃、Prepare 无信息、VLM 调用失败等）后，任务状态为 `failed` 时，UI 必须显示 `error_message` 字段内容：
+  - 进度页 `failed` 状态：显示错误原因 + 「重试」/「放弃」按钮
+  - 详情页 `FAILED` 状态：显示错误原因 + 「重试」/「放弃」按钮
+  - 主页待恢复区块：`failed` 任务显示错误原因摘要
+- **不降级**：VLM 阶段失败不自动降级到本地生成结果，任务标记为 FAILED 等待用户决策（重试或放弃），失败信息写入 `error_message`。
 
 ### 4.9 任务恢复流程
 
@@ -982,9 +1040,11 @@ fun removePhotoFromContent(content: String, photoId: Long): String {
 | 场景 | 恢复行为 |
 |------|---------|
 | Prepare 阶段被杀 | 启动时标记为 paused；用户恢复时从 Prepare 重新开始（代价低） |
+| Prepare 阶段无有效 EXIF | 标记 FAILED，error_message="未获取到任何照片信息..."，工作流停止 |
 | Geocode 阶段被杀 | 启动时标记为 paused；用户恢复时检查已完成的反查结果，跳过已完成的，继续剩余的 |
 | LocalGen 阶段被杀 | 启动时标记为 paused；用户恢复时重新执行（纯本地，秒级） |
 | VlmGen 阶段被杀 | 启动时标记为 paused；用户恢复时重新调 VLM API（可能消耗 token） |
+| 任意阶段用户手动放弃 | 标记 FAILED，error_message="用户手动停止任务"，不可恢复 |
 | Save 阶段被杀 | 启动时标记为 paused；用户恢复时检查游记是否已入库，已入库则跳过 |
 
 **注意**：所有阶段被杀后都不会自动恢复，统一标记为 paused 等待用户在主页主动决策。
