@@ -21,7 +21,7 @@ V2 设计了"选照片 → 自动地理反查 → 本地生成 → VLM 润色 �
 - **Save = Start**：保存按钮即启动按钮，点击后自动完成所有环节
 - **不丢数据**：任何阶段崩溃/退出，已完成的中间结果可恢复
 - **用户可中断**：运行中的任务可取消，已完成的阶段不回滚
-- **渐进增强**：无 VLM 配置时自动降级为纯本地生成，不阻塞主流程
+- **强制配置**：VLM API 和地理编码服务为**必须项**，未配置完成不允许启动工作流；首次启动进入引导页强制完成两项配置后才可使用主功能
 
 ---
 
@@ -87,6 +87,35 @@ APP 启动时检测到未完成任务时弹出：
 ╚══════════════════════════════════╝
 ```
 
+### 2.4 首次启动配置引导页（新增）
+
+APP 首次启动或检测到 VLM / 地理编码未配置时强制进入：
+
+```
+╔══════════════════════════════════╗
+║  欢迎使用 YouJi                  ║
+║                                  ║
+║  使用前需要完成以下配置：          ║
+║                                  ║
+║  1. VLM 大模型 API               ║
+║     [未配置] →                    ║
+║     baseUrl + apiKey + 模型选择   ║
+║     [测试连接] (必须通过)          ║
+║                                  ║
+║  2. 地理编码服务                  ║
+║     [未配置] →                    ║
+║     高德 Key（可选）               ║
+║     [测试] (必须通过)              ║
+║                                  ║
+║  [完成配置后开始使用]              ║
+╚══════════════════════════════════╝
+```
+
+- 两项必须全部配置完成（VLM 测试通过 + 地理编码测试通过）才能进入主功能
+- 「完成配置后开始使用」按钮在两项未通过前禁用
+- 配置完成后写入 SharedPreferences 标记 `setup_completed=true`，后续启动跳过引导页
+- 用户可在设置页随时修改这两项配置（修改后自动重置 `setup_completed` 要求重新测试）
+
 ---
 
 ## 3. 工作流引擎设计
@@ -109,7 +138,7 @@ APP 启动时检测到未完成任务时弹出：
 阶段 4: VLM 生成（VlmGenerate）
   - 构建结构化上下文 prompt
   - 调 VLM API 获取润色后正文
-  - 若 VLM 未配置或失败，降级用本地生成结果
+  - VLM 调用失败时任务标记为 FAILED，由用户决定重试或放弃（不自动降级）
   ↓
 阶段 5: 保存（Save）
   - TravelNoteEntity + PhotoEntity 入库
@@ -147,7 +176,28 @@ APP 启动时检测到未完成任务时弹出：
 
 - **取消**：调用 `cancel()` 后，当前阶段完成后停止（不强制中断网络请求）。已完成阶段的中间结果保留。
 - **重试**：失败阶段可单独重试，无需从头开始。
-- **降级**：VLM 阶段失败自动降级为本地生成结果，标记 `isGeneratedByVlm=false`，不阻塞后续 Save 阶段。
+- **不降级**：VLM 阶段失败不自动降级到本地生成结果，任务标记为 FAILED 等待用户决策（重试或放弃）。
+
+### 3.5 启动前置校验
+
+`WorkflowEngine.start()` 调用前必须先通过配置校验：
+
+```kotlin
+fun canStartWorkflow(): WorkflowStartCheck {
+    val vlmOk = vlmSettings.enabled &&
+        vlmSettings.apiUrl.isNotBlank() &&
+        vlmSettings.apiKey.isNotBlank() &&
+        vlmSettings.modelName.isNotBlank()
+    val geoOk = geocoderService.isAvailable()  // Geocoder.isPresent() 或 amapKey 非空
+    return WorkflowStartCheck(
+        canStart = vlmOk && geoOk,
+        missingVlm = !vlmOk,
+        missingGeo = !geoOk
+    )
+}
+```
+
+校验未通过时，UI 强制跳转到设置引导页，不允许用户进入创建游记流程。
 
 ---
 
@@ -358,19 +408,17 @@ private suspend fun runGeocode(taskId: Long) {
 **并发度**：3 个协程并行（兼顾速度与 Geocoder 限流）
 **Nominatim 特判**：若回退到 Nominatim，强制串行（1.1s 间隔）
 
-### 5.4 VLM 降级逻辑
+### 5.4 VLM 执行逻辑（不降级）
 
 ```kotlin
 private suspend fun runVlmGen(taskId: Long, style: WritingStyle) {
     val vlmSettings = vlmSettingsRepository.settings.first()
+    // 启动前已通过 canStartWorkflow() 校验，此处 vlmSettings 必然可用
+    require(vlmSettings.enabled) { "VLM 未配置，不应到达此阶段" }
+
     val localResult = phaseResultDao.getByTaskAndPhase(taskId, "local_gen")
         ?.resultJson?.let { parseGeneratedContent(it) }
-
-    if (!vlmSettings.enabled) {
-        // VLM 未配置，直接用本地生成结果
-        savePhaseResult(taskId, VLM_GEN, localResult.toJson())
-        return
-    }
+        ?: throw IllegalStateException("本地生成阶段未完成")
 
     val photos = photoDao.getByTask(taskId)
     val vlmResult = vlmClient.generateTravelContent(vlmSettings, photos, style)
@@ -378,10 +426,11 @@ private suspend fun runVlmGen(taskId: Long, style: WritingStyle) {
     vlmResult.onSuccess { content ->
         val merged = localResult.copy(content = content)
         savePhaseResult(taskId, VLM_GEN, merged.toJson())
-    }.onFailure {
-        // 降级：保留本地生成内容
-        savePhaseResult(taskId, VLM_GEN, localResult.toJson())
-        markTaskNote("VLM生成失败，使用本地生成结果")
+    }.onFailure { e ->
+        // 失败时标记任务为 FAILED，等待用户重试或放弃
+        updatePhaseStatus(taskId, VLM_GEN, FAILED, e.message)
+        updateTaskStatus(taskId, "failed", e.message)
+        throw e
     }
 }
 ```
@@ -568,6 +617,7 @@ data class GeocodingSettings(
 3. DAO：`WorkflowTaskDao`、`WorkflowPhaseResultDao`、`WritingStyleDao`
 4. `GeocoderService` 实现：`SystemGeocoderService` + `NominatimGeocoderService` + `CompositeGeocoderService`
 5. `WorkflowEngine` 核心逻辑：5 个阶段的执行、持久化、恢复、取消
+6. `canStartWorkflow()` 前置校验：VLM 已配置 + 地理编码可用，缺一项拒绝启动
 
 ### 阶段 B：页面精简
 
@@ -575,12 +625,14 @@ data class GeocodingSettings(
 2. `CreateTravelViewModel`：简化 `save()` 为 `startWorkflow()`，不再直接保存
 3. `SaveAndGenerate` 按钮替代原 Save 按钮
 
-### 阶段 C：进度页 + 恢复机制
+### 阶段 C：进度页 + 恢复机制 + 首次配置引导
 
 1. `WorkflowProgressScreen`：全屏进度对话框
 2. `RecoveryDialog`：启动时检测未完成任务并询问
 3. `Application.onCreate()`：恢复逻辑入口
 4. `WorkflowViewModel`：管理进度状态和 UI 交互
+5. `SetupWizardScreen`：首次启动配置引导页，强制完成 VLM + 地理编码配置
+6. 启动路由：`setup_completed=false` → 强制进入引导页；否则进入主页
 
 ### 阶段 D：风格系统
 
@@ -634,12 +686,14 @@ data class GeocodingSettings(
 - 国内大部分手机可用，但不稳定
 - 回退链路：Geocoder(系统) → Nominatim(免 key) → 仅坐标
 - 已知可用：小米 MIUI、华为 EMUI、OPPO ColorOS、vivo OriginOS
+- **强制要求**：首次启动配置引导页要求地理编码测试必须通过，若 Geocoder 不可用，用户必须配置高德 Key 或确保有网络访问 Nominatim
 
 ### 10.6 VLM Token 成本
 
 - N 张照片 × detail:"low" ≈ N × 85 tokens
 - 结构化上下文 prompt ≈ 500-1000 tokens
 - 单次 20 张照片 ≈ 3000-4000 tokens 输入，可控
+- **强制要求**：VLM 测试不通过不允许进入主功能，首次配置时必须通过 API 连通性 + Vision 能力测试
 
 ---
 
