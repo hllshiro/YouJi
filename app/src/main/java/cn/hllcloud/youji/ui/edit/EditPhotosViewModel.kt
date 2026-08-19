@@ -53,6 +53,9 @@ class EditPhotosViewModel(
     /** 标记 editablePhotos 是否已初始化，避免 task 流后续重发覆盖用户的编辑。 */
     private var photosInitialized = false
 
+    /** 全局自增序号，配合时间戳保证导入照片文件名唯一，避免并发/同毫秒覆盖。 */
+    private val photoSeq = java.util.concurrent.atomic.AtomicLong(0)
+
     init {
         // 订阅任务流：首次拿到任务时用 inputPhotoPaths 初始化本地副本；
         // 之后只跟随 task.status 变化（如 running → paused 时 UI 状态同步更新）。
@@ -97,7 +100,32 @@ class EditPhotosViewModel(
         get() = _taskStatus.value != "running"
 
     /**
-     * 添加照片（从 Uri 导入）。复制到应用私有目录后读 EXIF，append 到本地列表。
+     * 批量添加照片（从图库多选）。所有 URI 在单个协程内顺序处理，
+     * 避免 [addPhotoFromUri] 逐个启动协程导致的"读-改-写"竞态与同名文件覆盖。
+     */
+    fun addPhotosFromUris(uris: List<Uri>, context: Context) {
+        if (!canEdit) {
+            _error.value = "任务运行中，请先暂停再编辑"
+            return
+        }
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                uris.forEach { uri ->
+                    val fileName = "import_${System.currentTimeMillis()}_${photoSeq.incrementAndGet()}.jpg"
+                    val copiedFile = FileUtil.copyUriToInternal(context, uri, fileName)
+                    if (copiedFile != null) {
+                        addPhotoFileInternal(copiedFile)
+                    } else {
+                        _error.value = "复制照片失败"
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 添加照片（从单个 Uri 导入）。复制到应用私有目录后读 EXIF，append 到本地列表。
      */
     fun addPhotoFromUri(uri: Uri, context: Context) {
         if (!canEdit) {
@@ -106,7 +134,7 @@ class EditPhotosViewModel(
         }
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
-                val fileName = "import_${System.currentTimeMillis()}.jpg"
+                val fileName = "import_${System.currentTimeMillis()}_${photoSeq.incrementAndGet()}.jpg"
                 val copiedFile = FileUtil.copyUriToInternal(context, uri, fileName)
                 if (copiedFile != null) {
                     addPhotoFileInternal(copiedFile)

@@ -47,6 +47,9 @@ class CreateTravelViewModel(
     private val _uiState = MutableStateFlow(CreateUiState())
     val uiState: StateFlow<CreateUiState> = _uiState.asStateFlow()
 
+    /** 全局自增序号，配合时间戳保证导入照片文件名唯一，避免并发/同毫秒覆盖。 */
+    private val photoSeq = java.util.concurrent.atomic.AtomicLong(0)
+
     /** 风格列表（内置 + 自定义）。 */
     val styles: StateFlow<List<WritingStyleEntity>> = writingStyleRepository.getAll()
         .stateIn(
@@ -64,12 +67,31 @@ class CreateTravelViewModel(
         )
 
     /**
-     * 添加照片（从 Uri 导入）
+     * 批量添加照片（从图库多选）。所有 URI 在单个协程内顺序处理，
+     * 避免 [addPhotoFromUri] 逐个启动协程导致的"读-改-写"竞态与同名文件覆盖。
+     */
+    fun addPhotosFromUris(uris: List<Uri>, context: android.content.Context) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                uris.forEach { uri ->
+                    val fileName = "import_${System.currentTimeMillis()}_${photoSeq.incrementAndGet()}.jpg"
+                    val copiedFile = FileUtil.copyUriToInternal(context, uri, fileName)
+                    if (copiedFile != null) {
+                        addPhotoFileInternal(copiedFile)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 添加照片（从单个 Uri 导入，如外部单次调用）
      */
     fun addPhotoFromUri(uri: Uri, context: android.content.Context) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
-                val fileName = "import_${System.currentTimeMillis()}.jpg"
+                val fileName = "import_${System.currentTimeMillis()}_${photoSeq.incrementAndGet()}.jpg"
                 val copiedFile = FileUtil.copyUriToInternal(context, uri, fileName)
                 if (copiedFile != null) {
                     addPhotoFileInternal(copiedFile)

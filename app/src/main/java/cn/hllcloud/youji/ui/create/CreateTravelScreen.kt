@@ -126,9 +126,7 @@ fun CreateTravelScreen(
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris: List<Uri> ->
-        uris.forEach { uri ->
-            viewModel.addPhotoFromUri(uri, context)
-        }
+        viewModel.addPhotosFromUris(uris, context)
     }
 
     // 拍照
