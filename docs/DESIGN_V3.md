@@ -18,10 +18,11 @@ V2 设计了"选照片 → 自动地理反查 → 本地生成 → VLM 润色 �
 
 ### 1.3 设计原则
 
-- **Save = Start**：保存按钮即启动按钮，点击后自动完成所有环节
+- **Save ≠ Start**：保存按钮只持久化草稿（照片列表 + 风格），不自动启动工作流；用户在草稿页/详情页主动点击「开始生成」才启动。这样执行前的修改完全不触发任何后台调用。
 - **不丢数据**：任何阶段崩溃/退出，已完成的中间结果可恢复
 - **用户可中断**：运行中的任务可取消，已完成的阶段不回滚
 - **强制配置**：VLM API 和地理编码服务为**必须项**，未配置完成不允许启动工作流；首次启动进入引导页强制完成两项配置后才可使用主功能
+- **增量优化**：编辑场景下 GEOCODE 只处理新增图片，VLM 只处理增量（新增/删除 diff），省钱省时
 
 ---
 
@@ -44,8 +45,11 @@ V2 设计了"选照片 → 自动地理反查 → 本地生成 → VLM 润色 �
 ```
 [照片选择区（3列网格）]
 [风格选择行：纪实(选中) 美化 +管理]
-[保存并生成]  ← 唯一主按钮
+[保存草稿]  [开始生成]
 ```
+
+- 「保存草稿」：仅持久化照片列表 + 风格选择到 workflow_task（状态 `pending`），不触发任何后台调用。用户可在草稿页继续增删照片、换风格，反复保存无副作用。
+- 「开始生成」：校验配置通过后启动工作流，进入进度页。仅 pending 状态可点击；running/paused 状态此按钮禁用（避免重复启动）。
 
 ### 2.2 工作流进度页（新增）
 
@@ -624,8 +628,11 @@ Column {
         }
     }
 
-    // 保存按钮
-    Button("保存并生成")  ← 替代原有的"智能生成"+"VLM生成"+"保存"
+    // 操作按钮
+    Row {
+        Button("保存草稿")  ← 仅持久化，不触发后台
+        Button("开始生成")  ← 启动工作流，仅 pending 状态可用
+    }
 }
 ```
 
@@ -640,7 +647,7 @@ Column {
 **保留的组件**：
 - 照片选择区（拍照 + 图库 + 3列网格）
 - 风格选择行
-- 保存按钮（改为"保存并生成"）
+- 「保存草稿」+「开始生成」按钮组
 
 ### 6.2 工作流进度页（新页面）
 
@@ -662,30 +669,238 @@ Column {
 游记详情页
 ├── 内容展示区（标题/正文/照片/日期等，原有功能）
 └── 工作流状态区（仅在 travelNote.workflowTaskId != null 时显示）
-    ├── 状态徽标（运行中 / 已暂停 / 已完成 / 失败）
+    ├── 状态徽标（草稿 / 运行中 / 已暂停 / 已完成 / 失败）
     ├── 阶段进度文本（"(3/5) 整理行程内容" 形式，无百分比）
     └── 操作按钮（按状态切换）
+        ├── PENDING（草稿）：[开始生成]  [编辑照片]
         ├── RUNNING：[暂停]
-        ├── PAUSED：[恢复]  [放弃]
-        ├── COMPLETED：（无按钮，仅显示"AI生成完成"徽标）
+        ├── PAUSED：[恢复]  [放弃]  [编辑照片]
+        ├── COMPLETED：[增量更新]  [编辑照片]
         └── FAILED：[重试]  [放弃]
 ```
 
 **按钮行为**：
+- **开始生成** → 校验配置后启动工作流，进入进度页
 - **暂停** → 触发 `PauseConfirmDialog`，确认后任务改 `paused`
 - **恢复** → 任务改 `running`，从 `current_phase` 续传，UI 切换到进度反馈模式
 - **重试** → 失败阶段重新执行，其他已完成阶段跳过
 - **放弃** → 任务标记 `failed`，清理中间数据，游记本体保留（若 Save 阶段已部分完成）
+- **编辑照片** → 进入照片编辑模式（增删照片），保存后根据当前任务状态触发对应编辑流程（详见 6.5 节）
+- **增量更新** → 任务完成后用户编辑了照片或正文，点击此按钮触发增量生成（详见 6.5 节）
 
 **设计要点**：
 - 进度页和详情页共用同一套工作流状态 ViewModel，避免逻辑重复
 - 详情页的"恢复"与首页"待恢复"区块的"恢复"完全一致，调用同一个 `WorkflowEngine.resume()`
 - 任务 RUNNING 时详情页只读，不允许编辑正文（避免与 AI 生成结果冲突）
-- 任务 PAUSED/COMPLETED 后允许用户编辑正文
+- 任务 PENDING/PAUSED/COMPLETED 后允许用户编辑正文和照片
+- 任务 PENDING 状态等同于"草稿"，此时「保存草稿」无意义（已入库），主操作变为「开始生成」
 
 ### 6.4 任务恢复区块（首页）
 
 详见 2.3 节，主页顶部展示 paused 任务列表，支持「恢复全部」、单个卡片直接恢复、「管理」入口。恢复按钮无二次确认（无副作用操作），暂停才需要二次确认。
+
+### 6.5 编辑场景处理（核心）
+
+用户编辑照片的时机分三种，处理策略各异。**核心目标**：GEOCODE 只处理新增图片，VLM 只处理增量 diff，最大化复用已有结果以省钱省时。
+
+#### 场景一：执行前编辑（任务状态 `pending`）
+
+**特点**：工作流尚未启动，所有阶段结果为空，编辑完全无副作用。
+
+**操作流程**：
+```
+用户在草稿页/详情页编辑照片（增删改）
+  ↓
+点击「保存」 → 直接更新 workflow_task.input_photo_paths 和 PhotoEntity 列表
+  ↓
+（不触发任何后台调用，不创建 phase_result）
+  ↓
+用户点击「开始生成」→ 正常启动工作流，从 Prepare 阶段开始
+```
+
+**GEOCODE 优化**：无（任务未启动，无已反查数据可复用）
+**VLM 优化**：无（任务未启动，无生成结果可复用）
+
+#### 场景二：执行中编辑（任务状态 `running` / `paused`）
+
+**特点**：工作流正在执行或被暂停，已有部分阶段结果。用户编辑照片后，正在执行的阶段结果可能失效。
+
+**操作流程**：
+```
+用户点击「编辑照片」（仅 paused 状态允许，running 状态需先暂停）
+  ↓
+进入照片编辑模式，增删照片
+  ↓
+点击「保存修改」
+  ↓
+系统对比新旧照片列表，计算 diff:
+  - 新增照片集合: added[]
+  - 删除照片集合: removed[]
+  - 未变照片集合: unchanged[]
+  ↓
+根据 diff 决定后续阶段处理:
+  ├── 若 added 为空且 removed 为空 → 无变化，直接恢复执行
+  ├── 若仅有 added → 走"增量补充"流程
+  └── 若有 removed → 走"重建上下文"流程
+```
+
+**diff 处理策略**：
+
+| diff 情况 | Geocode 阶段 | LocalGen 阶段 | VlmGen 阶段 | Save 阶段 |
+|----------|-------------|-------------|------------|----------|
+| 仅 added | 仅反查 added[]，unchanged[] 的 locationName 保留 | 标记失效，重新执行 | 标记失效，重新执行 | 等待 |
+| 有 removed | 跳过（被删的 PhotoEntity 直接 delete） | 标记失效，重新执行 | 标记失效，重新执行 | 等待 |
+| 无变化 | 跳过 | 跳过 | 跳过 | 跳过 |
+
+**关键点**：
+- **GEOCODE 复用**：unchanged[] 的 `locationName` 保留，added[] 才调 `reverseGeocode`。added 反查完成后合并到完整列表供后续阶段使用。
+- **LocalGen/VlmGen 不可复用**：照片集合变化后，已生成的内容已失效，必须重新执行。但 LocalGen 是本地的，代价低；VlmGen 重新调一次 API 是必要代价。
+- **阶段结果清理**：编辑后把 `local_gen` 和 `vlm_gen` 的 phase_result 删除（标记为 `pending`），恢复执行时从 Geocode 阶段后继续，跳过已完成的 Geocode。
+
+#### 场景三：执行后编辑（任务状态 `completed`）
+
+**特点**：游记已生成并入库，用户对照片或正文做了修改，需要增量更新内容。
+
+**操作流程**：
+```
+用户在详情页点击「编辑照片」
+  ↓
+增删照片 → 保存
+  ↓
+系统计算 diff: added[] / removed[] / unchanged[]
+  ↓
+用户点击「增量更新」 → 根据 diff 选择更新策略:
+  ├── 仅 added（新增照片）→ 增量补充模式（省钱）
+  ├── 仅 removed（删除照片）→ 删除标记模式
+  └── 混合（既有新增又有删除）→ 增量补充 + 删除标记
+```
+
+**策略 A：仅 added（新增照片）—— 最省钱**
+
+```
+1. 对 added[] 执行 Geocode（unchanged[] 跳过）
+2. 读取原 vlm_gen 的 result_json（即原游记正文）
+3. 构建 VLM 增量 prompt:
+   "以下是已有游记内容：
+    {原正文}
+
+    现新增了 N 张照片：
+    照片1：拍摄时间 X、地点 Y、画面描述[可选]
+    照片2：...
+
+    请在保持原文风格和结构的基础上，将新增照片自然融入游记，
+    可以在合适位置插入新段落，不要重写已有内容。"
+4. 调 VLM 一次 → 拿到增量更新后的正文
+5. 更新游记 content，PhotoEntity 关联到游记
+```
+
+**Token 估算**：仅 added[] 图片的 Vision tokens + 原文作为上下文（~1000 tokens 文本），远低于全量重新生成。
+
+**策略 B：仅 removed（删除照片）—— 不调 VLM**
+
+```
+1. 从原游记正文中识别被删照片对应的段落
+   - 方案1：原游记生成时让 VLM 给每段标注 [PHOTO:id]，删除时直接定位
+   - 方案2：调用一次 VLM 做文本裁剪（"请删除以下照片相关内容：照片X"）
+2. 简单情况（方案1）：本地字符串处理，不调 VLM
+3. 复杂情况（方案2）：调一次 VLM 做最小范围修改
+4. 更新游记 content，删除 PhotoEntity
+```
+
+**推荐方案1**：VLM 生成时输出带 `[PHOTO:id]` 标记的正文，删除照片时本地正则替换，完全不调 VLM。
+
+**策略 C：混合（既有新增又有删除）**
+
+```
+1. 对 added[] 执行 Geocode
+2. 先处理 removed[]（按策略 B 删除标记）
+3. 再处理 added[]（按策略 A 增量补充）
+4. 一次 VLM 调用完成（prompt 同时包含新增和删除信息）
+```
+
+**Token 估算**：仅 added[] 图片 Vision tokens + 原文 + 删除指令，仍远低于全量重新生成。
+
+#### 6.5.1 数据模型支持
+
+`workflow_phase_results` 表新增字段以支持增量：
+
+```sql
+ALTER TABLE workflow_phase_results ADD COLUMN phase_version INTEGER NOT NULL DEFAULT 1;
+-- 每次编辑后递增，用于追踪结果版本
+```
+
+`workflow_tasks` 表新增字段：
+
+```sql
+ALTER TABLE workflow_tasks ADD COLUMN last_diff_json TEXT;
+-- 记录上次编辑的 diff（added/removed id 列表），供 VLM prompt 使用
+```
+
+#### 6.5.2 VLM Prompt 模板（增量更新）
+
+**新增照片（策略 A）**：
+```
+你是游记写作助手。以下是已有游记：
+
+【已有游记】
+{原正文}
+
+【风格】{style.name}：{style.promptGuideline}
+
+【新增照片】
+{对每张 added 照片：拍摄时间、地点、image_url}
+
+【任务】
+请在保持原文风格和结构的基础上，将新增照片自然融入游记。
+可在合适位置插入新段落，不要重写已有内容。
+保留原文中的 [PHOTO:id] 标记，新增照片用 [PHOTO:new_id] 标记。
+```
+
+**删除照片（策略 B，方案1，无 VLM）**：
+```kotlin
+fun removePhotoFromContent(content: String, photoId: Long): String {
+    // 删除 [PHOTO:photoId] 标记及其所在段落
+    val pattern = Regex("\\[PHOTO:$photoId\\][\\s\\S]*?(?=\\[PHOTO:|\\Z)", RegexOption.MULTILINE)
+    return pattern.replace(content, "").trim()
+}
+```
+
+#### 6.5.3 编辑场景的成本对比
+
+| 场景 | Geocode 调用 | VLM 调用 | Token 量 |
+|------|------------|---------|---------|
+| 全量重新生成 | N 次 | 1 次 | 全部图片 Vision + 全文重写 |
+| 仅新增 K 张 | K 次 | 1 次 | K 张图片 Vision + 原文上下文 |
+| 仅删除 K 张 | 0 次 | 0 次（方案1） | 0 |
+| 混合（新增 K1 + 删除 K2） | K1 次 | 1 次 | K1 张图片 Vision + 原文 + 删除指令 |
+
+#### 6.5.4 编辑流程状态机
+
+```
+任务状态: COMPLETED
+  ↓
+用户编辑照片 → 保存
+  ↓
+任务状态保持 COMPLETED，但标记 has_pending_edit = true
+  ↓
+用户点击「增量更新」
+  ↓
+任务状态改 RUNNING，创建子任务（或复用原任务 + phase_version 递增）
+  ↓
+执行增量阶段:
+  ├── GeocodeIncrement（仅 added）
+  ├── VlmIncrement（增量 prompt）
+  └── SaveUpdate（更新游记 content）
+  ↓
+任务状态改 COMPLETED，has_pending_edit = false
+```
+
+#### 6.5.5 边界情况
+
+- **编辑后未点增量更新就退出**：游记保留原内容，PhotoEntity 已更新，下次进入详情页仍显示「增量更新」按钮（has_pending_edit 标记）
+- **增量更新过程中再次编辑**：禁止。RUNNING 状态下「编辑照片」按钮禁用，必须等增量更新完成或暂停
+- **VLM 增量失败**：保留原游记内容不动，任务标记 FAILED，允许重试或放弃（放弃 = 回滚 PhotoEntity 到编辑前快照）
+- **用户手动编辑正文后再增量更新照片**：VLM prompt 中的「已有游记」用用户最新编辑的正文，而不是原 vlm_gen 的 result_json
 
 ---
 
@@ -708,6 +923,8 @@ CREATE TABLE workflow_tasks (
   input_photo_paths TEXT NOT NULL,
   created_note_id INTEGER,
   error_message TEXT,
+  has_pending_edit INTEGER NOT NULL DEFAULT 0,    -- 是否有未应用的编辑（0/1）
+  last_diff_json TEXT,                            -- 上次编辑 diff（added/removed id 列表）
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 )
@@ -722,6 +939,7 @@ CREATE TABLE workflow_phase_results (
   status TEXT NOT NULL DEFAULT 'pending',
   result_json TEXT,
   error_message TEXT,
+  phase_version INTEGER NOT NULL DEFAULT 1,  -- 每次编辑后递增，追踪结果版本
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE(task_id, phase)
@@ -857,7 +1075,17 @@ data class GeocodingSettings(
 3. 风格管理页（新增/编辑/删除）
 4. `LocalContentGenerator` + `VlmClient` 接入 style 参数
 
-### 阶段 E：收尾
+### 阶段 E：增量更新（编辑场景）
+
+1. `PhotoEditDiff` 计算：added/removed/unchanged id 列表
+2. `WorkflowEngine.applyEdit(taskId, diff)`：根据 diff 清理失效阶段结果，标记 has_pending_edit
+3. Geocode 增量：仅反查 added[]，复用 unchanged[]
+4. VLM 增量 prompt 模板（策略 A/B/C）
+5. `[PHOTO:id]` 标记的本地删除逻辑（策略 B 方案1，无 VLM）
+6. 详情页「增量更新」按钮 + 编辑流程状态机
+7. 边界情况处理：放弃时回滚 PhotoEntity 快照
+
+### 阶段 F：收尾
 
 1. `AmapGeocoderService` 可选实现
 2. 设置页加"地图服务"区块
