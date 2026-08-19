@@ -22,4 +22,5 @@ data class PhotoEntity(
     val exifModel: String? = null, // 相机型号
     val description: String? = null, // 照片描述
     val createdAt: Long = System.currentTimeMillis(),
+    val workflowTaskId: Long? = null, // 关联的工作流任务ID（Prepare阶段写入，Save阶段清空）
 )

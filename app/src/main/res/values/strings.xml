@@ -54,6 +54,13 @@
     <string name="settings_clear_data">清除所有数据</string>
     <string name="settings_clear_confirm">确定要清除所有数据吗？此操作不可恢复！</string>
 
+    <!-- 地理编码服务 -->
+    <string name="settings_geo">地理编码服务</string>
+    <string name="settings_geo_amap_key">高德 Web 服务 Key</string>
+    <string name="settings_geo_amap_hint">可选，配置后优先使用高德反查地名，提升精度</string>
+    <string name="settings_geo_amap_saved">高德 Key 已保存，重启应用后生效</string>
+    <string name="settings_geo_tip">说明：不填写高德 Key 时，将依次回退使用系统 Geocoder 与 Nominatim 在线服务；填写高德 Key 并重启后，会插入到回退链第二位（位于系统 Geocoder 之后、Nominatim 之前）。</string>
+
     <!-- 一图流 -->
     <string name="one_image_title">游记一图流</string>
     <string name="one_image_generate">生成一图流</string>

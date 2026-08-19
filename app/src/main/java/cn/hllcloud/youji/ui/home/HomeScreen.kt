@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
@@ -67,11 +68,13 @@ import java.io.File
 fun HomeScreen(
     onNavigateToCreate: () -> Unit,
     onNavigateToDetail: (Long) -> Unit,
+    onNavigateToWorkflowProgress: (Long) -> Unit,
     viewModel: HomeViewModel = viewModel(
         factory = HomeViewModel.Factory(LocalContext.current.applicationContext as YouJiApplication)
     )
 ) {
     val notes by viewModel.travelNotes.collectAsStateWithLifecycle()
+    val pendingTasks by viewModel.pendingTasks.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var showDeleteConfirm by remember { mutableStateOf<Long?>(null) }
 
@@ -102,7 +105,8 @@ fun HomeScreen(
             }
         }
     ) { paddingValues ->
-        if (notes.isEmpty()) {
+        if (notes.isEmpty() && pendingTasks.isEmpty()) {
+            // 全新用户：游记和待恢复任务都为空时显示完整空状态
             EmptyState(
                 modifier = Modifier.padding(paddingValues),
                 onActionClick = onNavigateToCreate,
@@ -120,12 +124,50 @@ fun HomeScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(notes, key = { it.id }) { note ->
-                    TravelNoteCard(
-                        note = note,
-                        onClick = { onNavigateToDetail(note.id) },
-                        onLongClick = { showDeleteConfirm = note.id }
-                    )
+                // 待恢复任务区块（顶部，跨两列）。对应设计 V3 第 2.4 节。
+                if (pendingTasks.isNotEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        PendingTasksSection(
+                            tasks = pendingTasks,
+                            onResumeAll = {
+                                val firstId = viewModel.resumeAll()
+                                if (firstId != null) {
+                                    onNavigateToWorkflowProgress(firstId)
+                                }
+                            },
+                            onResume = { taskId ->
+                                viewModel.resumeTask(taskId)
+                                onNavigateToWorkflowProgress(taskId)
+                            },
+                            onAbandon = { taskId -> viewModel.abandonTask(taskId) }
+                        )
+                    }
+                }
+
+                if (notes.isEmpty()) {
+                    // 有待恢复任务但还没有游记：展示精简空状态提示，避免大块空白
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "还没有游记，点击右下角开始创建",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else {
+                    items(notes, key = { it.id }) { note ->
+                        TravelNoteCard(
+                            note = note,
+                            onClick = { onNavigateToDetail(note.id) },
+                            onLongClick = { showDeleteConfirm = note.id }
+                        )
+                    }
                 }
             }
         }

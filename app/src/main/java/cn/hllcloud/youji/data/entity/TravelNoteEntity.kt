@@ -18,4 +18,7 @@ data class TravelNoteEntity(
     val isGeneratedByVlm: Boolean = false, // 是否由VLM生成
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
+    val writingStyleId: Long? = null, // 关联的写作风格ID
+    val writingStyleName: String? = null, // 冗余存储风格名
+    val workflowTaskId: Long? = null, // 关联的工作流任务ID
 )

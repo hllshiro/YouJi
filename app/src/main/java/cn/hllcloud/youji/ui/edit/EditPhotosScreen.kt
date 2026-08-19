@@ -1,4 +1,4 @@
-package cn.hllcloud.youji.ui.create
+package cn.hllcloud.youji.ui.edit
 
 import android.content.Intent
 import android.net.Uri
@@ -11,8 +11,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,25 +26,23 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Drafts
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -68,14 +64,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
-import cn.hllcloud.youji.R
 import cn.hllcloud.youji.YouJiApplication
 import cn.hllcloud.youji.data.entity.PhotoEntity
 import cn.hllcloud.youji.util.FileUtil
@@ -84,43 +78,41 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * 创建游记页（V3 版本）。
+ * 编辑照片页。对应设计 V3 第 5.1/5.2/5.3 节。
  *
- * 仅保留：照片选择区（3列网格）+ 风格选择行（Chip 形态）+ 操作按钮组
- * （保存草稿 / 开始生成）。
+ * 用户从详情页或草稿页点「编辑照片」后进入此页。本页：
+ * - 加载 [taskId] 对应 workflow_task 的 `inputPhotoPaths` 重建为可编辑列表（3 列网格）
+ * - 复用创建页的拍照/图库选择交互（含国产 ROM 权限兼容与永久拒绝引导）
+ * - 「保存」按钮调用 [EditPhotosViewModel.saveEdit]，引擎 [cn.hllcloud.youji.util.WorkflowEngine.applyPhotoEdit]
+ *   计算 diff 并按场景一（pending）/场景二（paused/failed）/场景三（completed）执行副作用
+ * - 任务 running 时禁用编辑并显示警告条（应先暂停），保存成功后返回上一页
  *
- * 移除的组件：标题输入框、日期范围选择卡、正文输入框、智能生成 / VLM 生成按钮、
- * 生成进度条（移到独立进度页）、VLM 提示 Chip。
- *
- * 对应设计文档 V3 第 2.1 节、Task 6。
+ * @param taskId 工作流任务 id
+ * @param onNavigateBack 保存成功或用户取消时回调（通常返回详情页）
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CreateTravelScreen(
+fun EditPhotosScreen(
+    taskId: Long,
     onNavigateBack: () -> Unit,
-    onDraftSaved: (Long) -> Unit,
-    onWorkflowStarted: (Long) -> Unit,
-    onNavigateToSettings: () -> Unit,
-    onNavigateToStyleManager: () -> Unit,
-    viewModel: CreateTravelViewModel = viewModel(
-        factory = CreateTravelViewModel.Factory(
-            LocalContext.current.applicationContext as YouJiApplication
+    viewModel: EditPhotosViewModel = viewModel(
+        factory = EditPhotosViewModel.Factory(
+            LocalContext.current.applicationContext as YouJiApplication,
+            taskId
         )
     )
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val styles by viewModel.styles.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var cameraPhotoFile by remember { mutableStateOf<File?>(null) }
 
-    // 标记是否已经请求过权限，用于区分"首次未请求"和"被永久拒绝"
-    var hasRequestedCameraPermission by remember { mutableStateOf(false) }
-    var hasRequestedGalleryPermission by remember { mutableStateOf(false) }
     // 永久拒绝权限时显示引导对话框
     var showPermissionSettingsDialog by remember { mutableStateOf(false) }
     var permissionSettingsMessage by remember { mutableStateOf("") }
+
+    val canEdit = uiState.taskStatus != "running"
 
     // 图库选择
     val galleryLauncher = rememberLauncherForActivityResult(
@@ -144,8 +136,8 @@ fun CreateTravelScreen(
     }
 
     /**
-     * 启动相机（已具备权限时调用）
-     * 国产ROM兼容：显式授予URI读写权限，避免部分系统裁剪/拍照时崩溃
+     * 启动相机（已具备权限时调用）。
+     * 国产ROM兼容：显式授予URI读写权限，避免部分系统裁剪/拍照时崩溃。
      */
     val launchCamera: () -> Unit = {
         try {
@@ -178,7 +170,6 @@ fun CreateTravelScreen(
     val galleryPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        hasRequestedGalleryPermission = true
         val granted = permissions.values.any { it } ||
             PermissionUtil.hasReadImagePermission(context)
         if (granted) {
@@ -202,7 +193,6 @@ fun CreateTravelScreen(
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        hasRequestedCameraPermission = true
         val granted = permissions.values.all { it }
         if (granted) {
             launchCamera()
@@ -221,43 +211,22 @@ fun CreateTravelScreen(
         }
     }
 
-    // 默认选中第一个内置风格（仅在首次风格列表加载完毕且用户未选时）
-    LaunchedEffect(styles) {
-        if (uiState.selectedStyleId == null && styles.isNotEmpty()) {
-            val firstBuiltin = styles.firstOrNull { it.isBuiltin == 1 } ?: styles.first()
-            viewModel.selectStyle(firstBuiltin)
+    // 一次性错误事件消费
+    LaunchedEffect(uiState.error) {
+        uiState.error?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.consumeError()
         }
     }
 
-    // 保存草稿
-    val saveDraft: () -> Unit = {
-        if (uiState.selectedPhotos.isEmpty()) {
-            scope.launch { snackbarHostState.showSnackbar("请先选择照片") }
-        } else {
-            scope.launch {
-                val taskId = viewModel.saveDraft()
-                if (taskId > 0) {
-                    onDraftSaved(taskId)
-                } else {
-                    snackbarHostState.showSnackbar("保存草稿失败")
-                }
-            }
-        }
-    }
-
-    // 开始生成
-    val startWorkflow: () -> Unit = {
-        scope.launch {
-            val (taskId, error) = viewModel.startWorkflow()
-            if (taskId > 0) {
-                onWorkflowStarted(taskId)
-            } else if (error != null) {
-                // 配置未完成时，提示并跳转设置引导
-                snackbarHostState.showSnackbar(error)
-                if (error.contains("VLM") || error.contains("地理编码")) {
-                    onNavigateToSettings()
-                }
-            }
+    // 保存成功：showSnackbar 会挂起到 Snackbar 消失（约 1.5s），
+    // 用户看到提示后立即返回上一页。注意 consumeResult 与 onNavigateBack 之间不能有
+    // 挂起点——consume 改变 key 会触发 LaunchedEffect 重启，若中间有挂起会被取消。
+    LaunchedEffect(uiState.resultMessage) {
+        uiState.resultMessage?.let { msg ->
+            snackbarHostState.showSnackbar(msg)
+            viewModel.consumeResult()
+            onNavigateBack()
         }
     }
 
@@ -266,13 +235,22 @@ fun CreateTravelScreen(
             TopAppBar(
                 title = {
                     Text(
-                        text = stringResource(R.string.create_title),
+                        text = "编辑照片",
                         style = MaterialTheme.typography.titleLarge
                     )
                 },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(imageVector = Icons.Default.ArrowBack, contentDescription = null)
+                    }
+                },
+                actions = {
+                    // 顶部右侧也放一个保存按钮，方便快速保存
+                    if (canEdit && !uiState.isSaving) {
+                        IconButton(onClick = { viewModel.saveEdit() }) {
+                            Icon(imageVector = Icons.Default.Check, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary)
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -288,7 +266,38 @@ fun CreateTravelScreen(
                 .padding(paddingValues),
             contentPadding = PaddingValues(bottom = 32.dp)
         ) {
-            // 照片选择区域
+            // 任务运行中警告条
+            if (!canEdit) {
+                item {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFFFFF3E0)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = Color(0xFFEF6C00),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "任务运行中，请先暂停再编辑照片",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color(0xFFEF6C00)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 照片编辑区域
             item {
                 Card(
                     modifier = Modifier
@@ -305,15 +314,12 @@ fun CreateTravelScreen(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                text = stringResource(R.string.create_select_photos),
+                                text = "当前照片",
                                 style = MaterialTheme.typography.titleMedium,
                                 modifier = Modifier.weight(1f)
                             )
                             Text(
-                                text = stringResource(
-                                    R.string.create_photos_count,
-                                    uiState.selectedPhotos.size
-                                ),
+                                text = "共 ${uiState.photos.size} 张",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -328,7 +334,8 @@ fun CreateTravelScreen(
                         ) {
                             PhotoActionButton(
                                 icon = Icons.Default.CameraAlt,
-                                label = stringResource(R.string.create_take_photo),
+                                label = "拍照",
+                                enabled = canEdit,
                                 onClick = {
                                     if (PermissionUtil.hasCameraPermission(context)) {
                                         launchCamera()
@@ -342,7 +349,8 @@ fun CreateTravelScreen(
                             )
                             PhotoActionButton(
                                 icon = Icons.Default.PhotoLibrary,
-                                label = stringResource(R.string.create_select_photos),
+                                label = "从图库选择",
+                                enabled = canEdit,
                                 onClick = {
                                     if (PermissionUtil.hasReadImagePermission(context)) {
                                         galleryLauncher.launch("image/*")
@@ -357,20 +365,20 @@ fun CreateTravelScreen(
                         }
 
                         // 已选照片网格：每行3个，超过换行
-                        if (uiState.selectedPhotos.isNotEmpty()) {
+                        if (uiState.photos.isNotEmpty()) {
                             Spacer(modifier = Modifier.height(16.dp))
                             Divider(
                                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
                             )
                             Spacer(modifier = Modifier.height(12.dp))
 
-                            uiState.selectedPhotos.chunked(3).forEach { rowPhotos ->
+                            uiState.photos.chunked(3).forEach { rowPhotos ->
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     rowPhotos.forEach { photo ->
-                                        SelectedPhotoItem(
+                                        EditablePhotoItem(
                                             photo = photo,
                                             onRemove = { viewModel.removePhoto(photo) },
                                             modifier = Modifier.weight(1f)
@@ -382,54 +390,18 @@ fun CreateTravelScreen(
                                 }
                                 Spacer(modifier = Modifier.height(8.dp))
                             }
-                        }
-                    }
-                }
-            }
-
-            // 风格选择行
-            item {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    )
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "写作风格",
-                                style = MaterialTheme.typography.titleMedium,
-                                modifier = Modifier.weight(1f)
-                            )
-                            // 风格管理入口（对应设计 V3 第 2.1 节"风格选择行 +管理"链接）
-                            TextButton(onClick = onNavigateToStyleManager) {
-                                Text("管理", color = MaterialTheme.colorScheme.primary)
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        // 风格 Chip 列表：FlowRow 自动换行
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            styles.forEach { style ->
-                                FilterChip(
-                                    selected = style.id == uiState.selectedStyleId,
-                                    onClick = { viewModel.selectStyle(style) },
-                                    label = { Text(style.name) },
-                                    leadingIcon = if (style.isBuiltin == 1) {
-                                        {
-                                            Icon(
-                                                imageVector = Icons.Default.AddAPhoto,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        }
-                                    } else null
+                        } else {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "暂无照片，请添加",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
@@ -437,42 +409,62 @@ fun CreateTravelScreen(
                 }
             }
 
-            // 操作按钮组
+            // 保存按钮
             item {
-                Spacer(modifier = Modifier.height(20.dp))
-                Row(
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = { viewModel.saveEdit() },
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(vertical = 14.dp),
+                    enabled = canEdit && !uiState.isSaving && uiState.photos.isNotEmpty(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = Color.White
+                    )
                 ) {
-                    // 保存草稿：仅持久化，不启动工作流
-                    OutlinedButton(
-                        onClick = saveDraft,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(vertical = 14.dp),
-                        enabled = uiState.selectedPhotos.isNotEmpty()
-                    ) {
-                        Icon(imageVector = Icons.Default.Drafts, contentDescription = null)
+                    if (uiState.isSaving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "保存中...", style = MaterialTheme.typography.labelLarge)
+                    } else {
+                        Icon(imageVector = Icons.Default.Check, contentDescription = null)
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(text = "保存草稿", style = MaterialTheme.typography.labelLarge)
+                        Text(text = "保存编辑", style = MaterialTheme.typography.labelLarge)
                     }
-                    // 开始生成：校验通过后启动工作流
-                    Button(
-                        onClick = startWorkflow,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(vertical = 14.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = Color.White
-                        ),
-                        enabled = uiState.selectedPhotos.isNotEmpty() && uiState.selectedStyleId != null
+                }
+            }
+
+            // 场景说明（帮助用户理解保存后的行为）
+            item {
+                Spacer(modifier = Modifier.height(16.dp))
+                val scenarioHint = when (uiState.taskStatus) {
+                    "pending" -> "草稿状态：保存后修改照片列表，回到详情页点「开始生成」启动工作流。"
+                    "paused", "failed" -> "已暂停/失败：保存后会清理已生成内容，回到详情页点「恢复/重试」继续。"
+                    "completed" -> "已完成：保存后标记待应用编辑，回到详情页点「增量更新」让AI生成新内容。"
+                    "running" -> "任务运行中：请先暂停任务再编辑照片。"
+                    else -> ""
+                }
+                if (scenarioHint.isNotBlank()) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
                     ) {
-                        Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(text = "开始生成", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            text = scenarioHint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(12.dp)
+                        )
                     }
                 }
             }
@@ -495,7 +487,7 @@ fun CreateTravelScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showPermissionSettingsDialog = false }) {
-                    Text(stringResource(R.string.detail_cancel))
+                    Text("取消")
                 }
             }
         )
@@ -519,6 +511,7 @@ private fun android.content.Context.findActivity(): android.app.Activity? {
 private fun PhotoActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
+    enabled: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -528,11 +521,14 @@ private fun PhotoActionButton(
             .clip(RoundedCornerShape(12.dp))
             .border(
                 width = 1.dp,
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = if (enabled) 0.5f else 0.2f),
                 shape = RoundedCornerShape(12.dp)
             )
-            .background(MaterialTheme.colorScheme.surface)
-            .clickable(onClick = onClick),
+            .background(
+                if (enabled) MaterialTheme.colorScheme.surface
+                else MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+            )
+            .clickable(enabled = enabled, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -540,7 +536,8 @@ private fun PhotoActionButton(
             imageVector = icon,
             contentDescription = null,
             modifier = Modifier.size(32.dp),
-            tint = MaterialTheme.colorScheme.primary
+            tint = if (enabled) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
@@ -552,7 +549,7 @@ private fun PhotoActionButton(
 }
 
 @Composable
-private fun SelectedPhotoItem(
+private fun EditablePhotoItem(
     photo: PhotoEntity,
     onRemove: () -> Unit,
     modifier: Modifier = Modifier
@@ -574,8 +571,14 @@ private fun SelectedPhotoItem(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-            )
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp
+                )
+            }
         }
         // 删除按钮
         Surface(

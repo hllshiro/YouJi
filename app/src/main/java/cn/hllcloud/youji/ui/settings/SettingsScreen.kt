@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SmartToy
@@ -96,6 +97,7 @@ fun SettingsScreen(
 ) {
     val currentSettings by viewModel.vlmSettings.collectAsStateWithLifecycle()
     val testState by viewModel.testState.collectAsStateWithLifecycle()
+    val currentAmapKey by viewModel.amapKey.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showClearDataConfirm by remember { mutableStateOf(false) }
@@ -103,6 +105,10 @@ fun SettingsScreen(
     // 临时编辑状态
     var localSettings by remember(currentSettings) { mutableStateOf(currentSettings) }
     var hasChanges by remember { mutableStateOf(false) }
+
+    // 高德 Key 本地编辑状态：跟随持久化值，用户修改后由区块内"保存Key"按钮独立保存
+    var localAmapKey by remember(currentAmapKey) { mutableStateOf(currentAmapKey) }
+    var amapKeyChanged by remember { mutableStateOf(false) }
 
     // 测试状态自动重置：每次修改配置后清空旧的测试结果
     LaunchedEffect(localSettings.apiUrl, localSettings.apiKey, localSettings.modelName) {
@@ -396,6 +402,121 @@ fun SettingsScreen(
                 }
             }
 
+            // 地理编码服务区
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.settings_geo),
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Text(
+                                text = stringResource(R.string.settings_geo_amap_hint),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    SettingsInputField(
+                        label = stringResource(R.string.settings_geo_amap_key),
+                        value = localAmapKey,
+                        onValueChange = {
+                            localAmapKey = it
+                            amapKeyChanged = it != currentAmapKey
+                        },
+                        placeholder = "在高德开放平台创建 Web 服务 Key 后填入",
+                        icon = Icons.Default.Key
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                viewModel.saveAmapKey(localAmapKey)
+                                amapKeyChanged = false
+                                Toast.makeText(
+                                    context,
+                                    context.getString(R.string.settings_geo_amap_saved),
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        },
+                        enabled = amapKeyChanged,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(vertical = 12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CloudUpload,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = stringResource(R.string.common_save),
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // 提示
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
+                            )
+                            .padding(12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.Top) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = stringResource(R.string.settings_geo_tip),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
+                    }
+                }
+            }
+
             // 数据管理区
             Card(
                 modifier = Modifier
@@ -512,7 +633,7 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SettingsInputField(
+fun SettingsInputField(
     label: String,
     value: String,
     onValueChange: (String) -> Unit,
@@ -559,7 +680,7 @@ private fun SettingsInputField(
  * VLM API测试结果展示卡片
  */
 @Composable
-private fun TestResultCard(
+fun TestResultCard(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     iconTint: Color,
     containerColor: Color,
@@ -623,7 +744,7 @@ private fun TestResultCard(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ModelSelectorField(
+fun ModelSelectorField(
     localSettings: VlmSettings,
     onModelChange: (String) -> Unit,
     viewModel: SettingsViewModel

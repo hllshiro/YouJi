@@ -6,9 +6,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import cn.hllcloud.youji.YouJiApplication
+import cn.hllcloud.youji.data.AppPreferencesRepository
 import cn.hllcloud.youji.data.VlmSettings
 import cn.hllcloud.youji.data.VlmSettingsRepository
 import cn.hllcloud.youji.util.VlmClient
+import cn.hllcloud.youji.util.geocoder.GeocoderService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -23,7 +25,9 @@ import kotlinx.coroutines.withContext
  */
 class SettingsViewModel(
     application: Application,
-    private val vlmSettingsRepository: VlmSettingsRepository
+    private val vlmSettingsRepository: VlmSettingsRepository,
+    private val appPreferencesRepository: AppPreferencesRepository,
+    private val geocoderService: GeocoderService
 ) : AndroidViewModel(application) {
 
     private val vlmClient = VlmClient()
@@ -33,6 +37,17 @@ class SettingsViewModel(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = VlmSettings()
+        )
+
+    /**
+     * 高德 Web 服务 Key（可选）。设置页"地理编码服务"区块订阅展示，
+     * 由 [AppPreferencesRepository.amapKey] 持久化。
+     */
+    val amapKey: StateFlow<String> = appPreferencesRepository.amapKey
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = ""
         )
 
     private val _testState = MutableStateFlow<VlmTestState>(VlmTestState.Idle)
@@ -45,6 +60,36 @@ class SettingsViewModel(
     // 是否强制使用自定义输入（用户主动切换为输入框模式）
     private val _useCustomModelInput = MutableStateFlow(false)
     val useCustomModelInput: StateFlow<Boolean> = _useCustomModelInput.asStateFlow()
+
+    /**
+     * 地理编码服务可用性。
+     *
+     * - null：尚未检测
+     * - true：服务可用（系统 Geocoder 或 Nominatim 至少一个可用）
+     * - false：所有实现均不可用
+     *
+     * SetupWizard 用此判断是否允许「完成配置」按钮可用，对应设计 V3 第 2.5 节。
+     */
+    private val _geoAvailable = MutableStateFlow<Boolean?>(null)
+    val geoAvailable: StateFlow<Boolean?> = _geoAvailable.asStateFlow()
+
+    /**
+     * 检测地理编码服务可用性。SetupWizard 进入页面时调用一次。
+     * [GeocoderService.isAvailable] 同步返回，但部分实现可能涉及网络，
+     * 故仍在 IO 调度器执行避免阻塞 UI。
+     */
+    fun checkGeoService() {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    geocoderService.isAvailable()
+                } catch (e: Throwable) {
+                    false
+                }
+            }
+            _geoAvailable.value = ok
+        }
+    }
 
     fun updateEnabled(enabled: Boolean) {
         viewModelScope.launch {
@@ -89,6 +134,27 @@ class SettingsViewModel(
     fun saveAll(settings: VlmSettings) {
         viewModelScope.launch {
             vlmSettingsRepository.saveSettings(settings)
+            // 配置变更后必须重新测试，重置 setup_completed 标记。
+            // 对应设计 V3 第 2.5 节：用户可在设置页随时修改这两项配置
+            // （修改后自动重置 setup_completed 要求重新测试）。
+            appPreferencesRepository.setSetupCompleted(false)
+        }
+    }
+
+    /**
+     * 完成首次配置。SetupWizard 在 VLM 测试通过 + 地理编码可用时调用：
+     * 1. 直接保存 VLM 配置（绕过 [saveAll]，避免再次重置 setup_completed）
+     * 2. 标记 setup_completed=true，后续启动跳过引导页
+     * 3. 调用 [onDone] 回调，UI 据此跳转到首页
+     *
+     * 注：必须确保调用前已通过 [testVlmConnection] 且 [testState] 为 Success，
+     * 否则视为配置不完整。
+     */
+    fun completeSetup(settings: VlmSettings, onDone: () -> Unit) {
+        viewModelScope.launch {
+            vlmSettingsRepository.saveSettings(settings)
+            appPreferencesRepository.setSetupCompleted(true)
+            onDone()
         }
     }
 
@@ -170,6 +236,16 @@ class SettingsViewModel(
     }
 
     /**
+     * 保存高德 Web 服务 Key。设置页"地理编码服务"区块点击保存按钮时调用。
+     * 保存后需要重启 App 才能将高德服务注入到地理编码回退链中。
+     */
+    fun saveAmapKey(key: String) {
+        viewModelScope.launch {
+            appPreferencesRepository.setAmapKey(key)
+        }
+    }
+
+    /**
      * VLM测试状态
      */
     sealed class VlmTestState {
@@ -205,7 +281,12 @@ class SettingsViewModel(
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             val app = application as YouJiApplication
-            return SettingsViewModel(application, app.vlmSettingsRepository) as T
+            return SettingsViewModel(
+                application,
+                app.vlmSettingsRepository,
+                app.appPreferencesRepository,
+                app.geocoderService
+            ) as T
         }
     }
 }

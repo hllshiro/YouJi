@@ -37,3 +37,7 @@ keystore.properties
 SECRETS_CONFIG.txt
 secrets*.txt
 *secret*.txt
+
+# ====== 本地设计文档与实施计划（本地参考，不入库）======
+docs/plan/
+docs/design/

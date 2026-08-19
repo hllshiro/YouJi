@@ -46,4 +46,12 @@ interface TravelNoteDao {
 
     @Query("UPDATE travel_notes SET updatedAt = :updatedAt WHERE id = :id")
     suspend fun updateTimestamp(id: Long, updatedAt: Long)
+
+    /**
+     * 增量更新游记正文。对应设计 V3 第 5.3 节场景三：
+     * added 照片由 VLM 生成新内容后写入 note.content，
+     * removed 照片由本地正则替换清除对应段落。
+     */
+    @Query("UPDATE travel_notes SET content = :content, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateContent(id: Long, content: String, updatedAt: Long)
 }

@@ -67,6 +67,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import cn.hllcloud.youji.R
 import cn.hllcloud.youji.YouJiApplication
 import cn.hllcloud.youji.data.entity.PhotoEntity
+import cn.hllcloud.youji.ui.workflow.WorkflowStatusSectionHost
 import cn.hllcloud.youji.util.DateFormatUtil
 import kotlinx.coroutines.launch
 import java.io.File
@@ -80,6 +81,7 @@ fun DetailScreen(
     noteId: Long,
     onNavigateBack: () -> Unit,
     onNavigateToEdit: (Long) -> Unit,
+    onNavigateToEditPhotos: (Long) -> Unit,
     onNavigateToOneImage: (Long) -> Unit,
     onNavigateToShare: (Long) -> Unit,
     onDeleted: () -> Unit,
@@ -304,6 +306,17 @@ fun DetailScreen(
                                 PhotoThumbCard(photo = photo)
                             }
                         }
+                    }
+                }
+
+                // 工作流状态区：仅当 note 关联了 workflowTaskId 时显示。
+                // 对应设计 V3 第 2.3 节。
+                note.workflowTaskId?.let { taskId ->
+                    item {
+                        WorkflowStatusSectionHost(
+                            taskId = taskId,
+                            onEditPhotos = { onNavigateToEditPhotos(taskId) }
+                        )
                     }
                 }
 

@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.util.Base64
 import cn.hllcloud.youji.data.VlmSettings
 import cn.hllcloud.youji.data.entity.PhotoEntity
+import cn.hllcloud.youji.data.entity.WritingStyleEntity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -359,16 +360,20 @@ class VlmClient {
      * 调用VLM生成游记内容（支持Vision图像理解）
      *
      * 处理流程：
-     * 1. 构建文本提示词和位置信息
+     * 1. 构建文本提示词和位置信息（结构化"照片 N：时间 X、地点 Y"格式 + 风格指导）
      * 2. 读取照片文件，压缩为 JPEG 并 base64 编码
      * 3. 构建 OpenAI 兼容的 Vision 请求（content 为数组，包含 text 和 image_url）
      * 4. 如果没有图片，退化为纯文本请求
      *
      * 注意：应在 IO 线程调用（涉及文件读取和网络请求）
+     *
+     * @param style 选中的写作风格，非空时使用其 promptGuideline / openingTone /
+     *              closingTone 注入 prompt；为空时回退到 settings.customPrompt
      */
     suspend fun generateTravelContent(
         settings: VlmSettings,
         photos: List<PhotoEntity>,
+        style: WritingStyleEntity? = null,
         customPrompt: String? = null
     ): Result<String> {
         if (!settings.enabled || settings.apiUrl.isBlank()) {
@@ -377,7 +382,7 @@ class VlmClient {
 
         return try {
             // 构建提示词
-            val prompt = buildPrompt(settings, photos, customPrompt)
+            val prompt = buildPrompt(settings, photos, style, customPrompt)
 
             // 构建图片位置信息
             val locationInfo = buildLocationInfo(photos)
@@ -398,42 +403,177 @@ class VlmClient {
     }
 
     /**
-     * 构建发送给VLM的提示词
+     * 增量生成游记正文。对应设计 V3 第 5.3 节场景三策略 A/C：
+     * 仅把新增照片的图像 token 发给 VLM，搭配已有正文做上下文，
+     * 让 VLM 在保持原文结构与 [PHOTO:id] 标记的基础上插入新增段落。
+     *
+     * - 仅 added：直接调用本方法
+     * - 混合（added + removed）：调用方先用 [removePhotoFromContent] 本地删除 removed 段落，
+     *   再把删除后的正文作为 [originalContent] 传入本方法
+     *
+     * @param addedPhotos 仅包含新增照片（[PhotoEntity.id] 已入库），不要传 unchanged 照片
+     * @param originalContent 已有游记正文（mixed 场景下是删除 removed 后的中间结果）
+     */
+    suspend fun generateIncrementalContent(
+        settings: VlmSettings,
+        addedPhotos: List<PhotoEntity>,
+        style: WritingStyleEntity? = null,
+        originalContent: String
+    ): Result<String> {
+        if (!settings.enabled || settings.apiUrl.isBlank()) {
+            return Result.failure(IllegalStateException("VLM未启用或API地址未配置"))
+        }
+        if (addedPhotos.isEmpty()) {
+            return Result.failure(IllegalArgumentException("新增照片列表为空"))
+        }
+
+        return try {
+            val prompt = buildIncrementalPrompt(settings, addedPhotos, style, originalContent)
+            val locationInfo = buildLocationInfo(addedPhotos)
+            val imageDataUrls = addedPhotos.mapNotNull { photo ->
+                ImageUtil.compressAndBase64Encode(photo.filePath)?.let { base64 ->
+                    ImageUtil.buildDataUrl(base64)
+                }
+            }
+            val response = sendHttpRequest(settings, prompt, locationInfo, imageDataUrls)
+            Result.success(response)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 本地删除游记正文中与指定照片 id 关联的段落。对应设计 V3 第 5.4 节策略 B（无 VLM 调用）。
+     *
+     * 段落识别规则：匹配 `[PHOTO:id]` 标记及其后到下一个 `[PHOTO:` 或文本末尾之间的内容。
+     * 即每个 [PHOTO:id] 标记独占一行后接所属段落，删除时连同标记和段落一并移除。
+     *
+     * 兼容 VLM 可能未严格按规则输出标记的情况：若正则未匹配到任何段，直接原样返回。
+     */
+    fun removePhotoFromContent(content: String, photoId: Long): String {
+        val pattern = Regex("\\[PHOTO:$photoId\\][\\s\\S]*?(?=\\[PHOTO:|$)", RegexOption.MULTILINE)
+        return pattern.replace(content, "").trim()
+    }
+
+    /**
+     * 构建增量 prompt。对应设计 V3 第 5.4 节策略 A 模板。
+     *
+     * 与全量 [buildPrompt] 的差异：
+     * - 不要求重写已有内容，仅要求把新增照片自然融入；
+     * - 输出必须是「完整新正文」（原文 + 新增段落），而非仅新增段落；
+     * - 保留原文 [PHOTO:id] 标记，新增照片用 [PHOTO:new_id] 标记。
+     */
+    private fun buildIncrementalPrompt(
+        settings: VlmSettings,
+        addedPhotos: List<PhotoEntity>,
+        style: WritingStyleEntity?,
+        originalContent: String
+    ): String {
+        val guideline = style?.promptGuideline?.takeIf { it.isNotBlank() }
+            ?: settings.customPrompt
+            ?: DEFAULT_GUIDELINE
+
+        val photoDetails = buildPhotoDetails(addedPhotos)
+
+        return buildString {
+            appendLine("你是游记写作助手。以下是已有游记：")
+            appendLine()
+            appendLine("【已有游记】")
+            appendLine(originalContent)
+            appendLine()
+            appendLine("【风格】")
+            if (style != null) {
+                appendLine("${style.name}：$guideline")
+                style.openingTone?.takeIf { it.isNotBlank() }?.let { appendLine("开篇语气：$it") }
+                style.closingTone?.takeIf { it.isNotBlank() }?.let { appendLine("结尾语气：$it") }
+            } else {
+                appendLine(guideline)
+            }
+            appendLine()
+            appendLine("【新增照片】")
+            appendLine(photoDetails)
+            appendLine()
+            appendLine("【任务】")
+            appendLine("请在保持原文风格和结构的基础上，将新增照片自然融入游记。")
+            appendLine("可在合适位置插入新段落，不要重写已有内容。")
+            appendLine("保留原文中的 [PHOTO:id] 标记，新增照片用 [PHOTO:new_id] 标记（new_id 见上方照片详情中的 id）。")
+            appendLine("输出完整的游记正文（原文 + 新增段落），不要输出标题，不要输出说明性文字。")
+        }.trim()
+    }
+
+    /**
+     * 构建发送给VLM的提示词。
+     *
+     * 风格注入逻辑：
+     * - 优先使用 [WritingStyleEntity.promptGuideline] 作为正文指导；
+     * - [WritingStyleEntity.openingTone] / [closingTone] 非空时作为开篇/结尾的额外约束；
+     * - [style] 为空时回退到调用方传入的 [customPrompt] 或 [VlmSettings.customPrompt]。
+     *
+     * 上下文结构化：按"照片 N：时间 X、地点 Y"格式列出每张照片，
+     * 配合位置坐标与文件名，让模型可结合图像内容与实际位置编写游记。
      */
     private fun buildPrompt(
         settings: VlmSettings,
         photos: List<PhotoEntity>,
+        style: WritingStyleEntity?,
         customPrompt: String?
     ): String {
-        val basePrompt = customPrompt ?: settings.customPrompt
+        val guideline = style?.promptGuideline?.takeIf { it.isNotBlank() }
+            ?: customPrompt
+            ?: settings.customPrompt
+            ?: DEFAULT_GUIDELINE
+
+        val openingTone = style?.openingTone?.takeIf { it.isNotBlank() }
+        val closingTone = style?.closingTone?.takeIf { it.isNotBlank() }
+
         val photoDetails = buildPhotoDetails(photos)
-        return """
-$basePrompt
 
-【旅行照片详情】
-$photoDetails
-
-请基于以上信息，生成游记正文内容：
-        """.trimIndent()
+        return buildString {
+            appendLine("【写作风格指导】")
+            appendLine(guideline)
+            openingTone?.let { appendLine("开篇语气：$it") }
+            closingTone?.let { appendLine("结尾语气：$it") }
+            appendLine()
+            appendLine("【旅行照片详情】")
+            appendLine(photoDetails)
+            appendLine()
+            appendLine("【输出要求】")
+            appendLine("请基于以上照片信息和图片内容，编写一篇结构清晰、文风符合上述指导的游记正文。")
+            appendLine("每张照片在正文中应自然对应一段，可在所属段末以独立一行 `[PHOTO:照片id]` 标记该照片归属，便于后续增量更新。")
+            appendLine("不要输出标题，标题会另行生成。")
+        }.trim()
     }
 
     /**
-     * 构建照片详情文本
+     * 结构化照片详情：按"照片 N：时间 X、地点 Y"格式输出。
+     * 时间缺失时省略时间，地点缺失时省略地点；两者都缺失时仅列出文件名和坐标。
      */
     private fun buildPhotoDetails(photos: List<PhotoEntity>): String {
         val sb = StringBuilder()
         photos.forEachIndexed { index, photo ->
-            sb.appendLine("照片${index + 1}:")
+            val seq = index + 1
+            sb.appendLine("照片 $seq（id=${photo.id}）：")
             sb.appendLine("  - 文件名: ${photo.fileName}")
-            photo.takenAt?.let { sb.appendLine("  - 拍摄时间: ${DateFormatUtil.formatFull(it)}") }
-            photo.locationName?.let { sb.appendLine("  - 位置: $it") }
+            photo.takenAt?.let {
+                sb.appendLine("  - 拍摄时间: ${DateFormatUtil.formatFull(it)}")
+            }
+            photo.locationName?.let {
+                sb.appendLine("  - 地点: $it")
+            }
             if (photo.latitude != null && photo.longitude != null) {
                 sb.appendLine("  - 坐标: ${ExifUtil.formatLatLong(photo.latitude, photo.longitude)}")
             }
-            photo.description?.let { sb.appendLine("  - 描述: $it") }
+            photo.description?.let {
+                sb.appendLine("  - 描述: $it")
+            }
             sb.appendLine()
         }
-        return sb.toString()
+        return sb.toString().trimEnd()
+    }
+
+    private companion object {
+        /** 兜底写作指导，未配置风格且未传入 customPrompt 时使用。 */
+        const val DEFAULT_GUIDELINE = "如实记录旅行经历，按时间地点顺序组织，结合照片内容自然过渡，文风平实。"
     }
 
     /**
